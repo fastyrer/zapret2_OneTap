@@ -264,3 +264,4 @@ v0.9.4.3
 
 * winws2, dvtws2: ASLR
 * github, linux-builder: reduce arm executable size by 20% - move to armv7+thumb
+* init.d: warn if hostlist/ipset files are inside zapret2 root

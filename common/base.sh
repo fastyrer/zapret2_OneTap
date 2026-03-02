@@ -438,6 +438,13 @@ has_bad_ws_options()
 		echo "Kernel ipsets should be used instead. Write custom scripts and filter IPs in kernel."
 		echo
 	}
+	contains "$1" "--ipset=$ZAPRET_BASE" || contains "$1" "--ipset-exclude=$ZAPRET_BASE" ||
+	contains "$1" "--hostlist=$ZAPRET_BASE" || contains "$1" "--hostlist-exclude=$ZAPRET_BASE" && {
+		echo
+		echo "WARNING !!! you store ipset or hostlist files inside '$ZAPRET_BASE'"
+		echo "It's not recommended. install_easy.sh will delete them during update."
+		echo
+	}
 	
 	return 1
 }
