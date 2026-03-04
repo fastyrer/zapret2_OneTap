@@ -12,6 +12,9 @@
 #include <fcntl.h>
 
 #define UNARY_PLUS(v) (v>0 ? "+" : "")
+//#define	MIN(v1,v2) ((v1)<(v2) ? (v1) : (v2))
+//#define	MAX(v1,v2) ((v1)<(v2) ? (v2) : (v1))
+
 
 // this saves memory. sockaddr_storage is larger than required. it can be 128 bytes. sockaddr_in6 is 28 bytes.
 typedef union

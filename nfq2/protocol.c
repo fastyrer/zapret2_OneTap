@@ -1252,6 +1252,11 @@ static int cmp_range64(const void * a, const void * b)
 {
 	return (((struct range64*)a)->offset < ((struct range64*)b)->offset) ? -1 : (((struct range64*)a)->offset > ((struct range64*)b)->offset) ? 1 : 0;
 }
+static bool intersected_u64(uint64_t l1, uint64_t r1, uint64_t l2, uint64_t r2)
+{
+	return l1>=l2 && l1<=r2 || r1>=l2 && r1<=r2 || l2>=l1 && l2<=r1 || r2>=l1 && r2<=r1;
+}
+
 bool QUICDefragCrypto(const uint8_t *clean,size_t clean_len, uint8_t *defrag,size_t *defrag_len, bool *bFull)
 {
 	// Crypto frame can be split into multiple chunks
@@ -1262,10 +1267,10 @@ bool QUICDefragCrypto(const uint8_t *clean,size_t clean_len, uint8_t *defrag,siz
 	uint8_t *defrag_data = defrag+10;
 	size_t defrag_data_len = *defrag_len-10;
 	uint8_t ft;
-	uint64_t offset,sz,szmax=0,zeropos=0,pos=0;
-	bool found=false;
+	uint64_t offset,sz,szmax=0,zeropos=0,pos=0,r1,r2;
+	bool found=false, isect;
 	struct range64 ranges[MAX_DEFRAG_PIECES];
-	int i,range=0;
+	int i,j,range=0;
 
 	while(pos<clean_len)
 	{
@@ -1292,12 +1297,12 @@ bool QUICDefragCrypto(const uint8_t *clean,size_t clean_len, uint8_t *defrag,siz
 				memset(defrag_data+zeropos,0,offset-zeropos);
 			if ((offset+sz) > zeropos)
 				zeropos=offset+sz;
+
 			memcpy(defrag_data+offset,clean+pos,sz);
 			if ((offset+sz) > szmax) szmax = offset+sz;
 
 			found=true;
 			pos+=sz;
-
 			ranges[range].offset = offset;
 			ranges[range].len = sz;
 			range++;
@@ -1305,6 +1310,37 @@ bool QUICDefragCrypto(const uint8_t *clean,size_t clean_len, uint8_t *defrag,siz
 	}
 	if (found)
 	{
+		//for(i=0 ; i<range ; i++)
+		//	printf("range1 %llu-%llu\n",ranges[i].offset,ranges[i].offset+ranges[i].len);
+		do
+		{
+			for(isect=false, i=range-1 ; i>=0 ; i--)
+			{
+				r1 = ranges[i].offset + ranges[i].len;
+				for(j=i-1 ; j>=0 ; j--)
+				{
+					r2 = ranges[j].offset + ranges[j].len;
+					//printf("test intersect i=%d j=%d %llu-%llu %llu-%llu\n",i,j,ranges[i].offset,r1,ranges[j].offset,r2);
+					if (intersected_u64(ranges[i].offset,r1,ranges[j].offset,r2))
+					{
+						// join range
+						isect = true;
+						ranges[j].offset = MIN(ranges[i].offset, ranges[j].offset);
+						ranges[j].len = MAX(r1,r2) - ranges[j].offset;
+						// delete element i
+						memmove(ranges+i, ranges+i+1, (range-i-1)*sizeof(*ranges));
+						range--;
+						//printf("intersected %llu-%llu\n",ranges[j].offset,ranges[j].offset+ranges[j].len);
+						//for(int k=0 ; k<range ; k++)
+						//	printf("rangeX %llu-%llu\n",ranges[k].offset,ranges[k].offset+ranges[k].len);
+						break;
+					}
+				}
+			}
+		} while(isect);
+		//for(i=0 ; i<range ; i++)
+		//	printf("range2 %llu-%llu\n",ranges[i].offset,ranges[i].offset+ranges[i].len);
+
 		defrag[0] = 6;
 		defrag[1] = 0; // offset
 		// 2..9 - length 64 bit
@@ -1313,21 +1349,7 @@ bool QUICDefragCrypto(const uint8_t *clean,size_t clean_len, uint8_t *defrag,siz
 		defrag[2] |= 0xC0; // 64 bit value
 		*defrag_len = (size_t)(szmax+10);
 
-		qsort(ranges, range, sizeof(*ranges), cmp_range64);
-
-		//for(i=0 ; i<range ; i++)
-		//	printf("RANGE %zu len %zu\n",ranges[i].offset,ranges[i].len);
-
-		for(i=0,offset=0,*bFull=true ; i<range ; i++)
-		{
-			if (ranges[i].offset!=offset)
-			{
-				*bFull = false;
-				break;
-			}
-			offset += ranges[i].len;
-		}
-
+		*bFull = range==1 && !ranges[0].offset;
 		//printf("bFull=%u\n",*bFull);
 	}
 	return found;

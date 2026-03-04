@@ -50,7 +50,6 @@ void qsort_ssize_t(ssize_t *array, int ct)
 	qsort(array, ct, sizeof(*array), cmp_ssize_t);
 }
 
-
 int str_index(const char **strs, int count, const char *str)
 {
 	for (int i = 0; i < count; i++)

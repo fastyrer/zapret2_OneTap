@@ -266,3 +266,9 @@ v0.9.4.3
 * github, linux-builder: reduce arm executable size by 20% - move to armv7+thumb
 * init.d: warn if hostlist/ipset files are inside zapret2 root
 * zapret-lib: do not call apply_arg_prefix in apply_execution_plan - call it right before instance execute
+
+0.9.4.5
+
+* github: rollback to lj_alloc in luajit for arm64 and mips64
+* nfqws2: join fragments in quic CRYPTO reconstruction. allow intersections.
+
