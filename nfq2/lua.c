@@ -3350,7 +3350,6 @@ static int luacall_tls_mod(lua_State *L)
 	int argc=lua_gettop(L);
 
 	size_t fake_tls_len;
-	bool bRes;
 	const uint8_t *fake_tls = (uint8_t*)lua_reqlstring(L,1,&fake_tls_len);
 	const char *modlist = lua_reqstring(L,2);
 
@@ -3370,8 +3369,10 @@ static int luacall_tls_mod(lua_State *L)
 		uint8_t *newtls = lua_newuserdata(L, maxlen);
 
 		memcpy(newtls, fake_tls, newlen);
-		bRes = TLSMod(&mod, payload, payload_len, newtls, &newlen, maxlen);
-		lua_pushlstring(L,(char*)newtls,newlen);
+		if (TLSMod(&mod, payload, payload_len, newtls, &newlen, maxlen))
+			lua_pushlstring(L,(char*)newtls,newlen);
+		else
+			lua_pushnil(L);
 
 		lua_remove(L,-2);
 	}
@@ -3379,11 +3380,9 @@ static int luacall_tls_mod(lua_State *L)
 	{
 		// no mod. push it back
 		lua_pushlstring(L,(char*)fake_tls,fake_tls_len);
-		bRes = true;
 	}
-	lua_pushboolean(L, bRes);
 
-	LUA_STACK_GUARD_RETURN(L,2)
+	LUA_STACK_GUARD_RETURN(L,1)
 }
 
 struct userdata_zs

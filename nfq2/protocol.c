@@ -649,9 +649,11 @@ bool TLSAdvanceToHostInSNI(const uint8_t **ext, size_t *elen, size_t *slen)
 	// u8	data+2 - server name type. 0=host_name
 	// u16	data+3 - server name length
 	if (*elen < 5 || (*ext)[2] != 0) return false;
+	uint16_t nll = pntoh16(*ext);
 	*slen = pntoh16(*ext + 3);
+	if (nll<(*slen+3) || *slen > *elen-5) return false;
 	*ext += 5; *elen -= 5;
-	return *slen <= *elen;
+	return true;
 }
 static bool TLSExtractHostFromExt(const uint8_t *ext, size_t elen, char *host, size_t len_host)
 {
