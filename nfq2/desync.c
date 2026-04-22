@@ -1212,8 +1212,7 @@ static bool play_prolog(
 			return false;
 		ps->bReverseFixed = ps->bReverse ^ params.server;
 		setup_direction(dis, ps->bReverseFixed, &ps->src, &ps->dst, &ps->sdip4, &ps->sdip6, &ps->sdport);
-
-		ifname = ps->bReverse ? ifin : ifout;
+		ifname = ps->bReverseFixed ? ifin : ifout;
 #ifdef HAS_FILTER_SSID
 		ps->ssid = wlan_ssid_search_ifname(ifname);
 		if (ps->ssid) DLOG("found ssid for %s : %s\n", ifname, ps->ssid);
@@ -1249,7 +1248,7 @@ static bool play_prolog(
 		// in absence of conntrack guess direction by presence of interface names. won't work on BSD
 		ps->bReverseFixed = ps->ctrack ? (ps->bReverse ^ params.server) : (ps->bReverse = ifin && *ifin && (!ifout || !*ifout));
 		setup_direction(dis, ps->bReverseFixed, &ps->src, &ps->dst, &ps->sdip4, &ps->sdip6, &ps->sdport);
-		ifname = ps->bReverse ? ifin : ifout;
+		ifname = ps->bReverseFixed ? ifin : ifout;
 #ifdef HAS_FILTER_SSID
 		ps->ssid = wlan_ssid_search_ifname(ifname);
 		if (ps->ssid) DLOG("found ssid for %s : %s\n", ifname, ps->ssid);
