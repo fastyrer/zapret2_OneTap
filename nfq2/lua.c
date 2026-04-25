@@ -3843,7 +3843,7 @@ static int luacall_timer_del(lua_State *L)
 		TimerPoolDel(&params.timers, timer);
 	}
 	else
-		DLOG("timer: '%s' not found\n", timer->str);
+		DLOG("timer: '%s' not found\n", name);
 	lua_pushboolean(L, !!timer);
 	LUA_STACK_GUARD_RETURN(L,1)
 }
