@@ -2083,7 +2083,7 @@ bool lua_reconstruct_iphdr(lua_State *L, int idx, struct ip *ip, size_t *len)
 		{
 			if (lopt>40 || ((sizeof(struct ip) + ((lopt+3)&~3)) > *len)) goto err;
 			memcpy(ip+1,p,lopt);
-			memset(((uint8_t*)ip) + sizeof(struct ip) + lopt, 0, (4-lopt&3)&3);
+			memset(((uint8_t*)ip) + sizeof(struct ip) + lopt, 0, (4-(lopt&3))&3);
 			lopt = (lopt+3) & ~3;
 		}
 	}
