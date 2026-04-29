@@ -2418,7 +2418,7 @@ The instance performing the cancellation takes over the coordination of further 
 
 ### Timer control
 
-Timer creation and deletion functions can be called from any Lua code.
+[Timer](#timers) creation and deletion functions can be called from any Lua code.
 This could be lua-init, lua-desync, or a timer function. A timer function can also act on itself, such as changing the period or terminating its own calls.
 
 Timers are identified by a name. Multiple timers with different names can call the same timer function.
