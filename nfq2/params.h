@@ -37,8 +37,6 @@
 
 #define IPCACHE_LIFETIME		7200
 
-#define TIMER_RES_DEFAULT		50
-
 #define MAX_GIDS 64
 
 #define MAX_BLOB_SIZE			(16*1024)
@@ -195,8 +193,8 @@ struct params_s
 	bool writeable_dir_enable;
 	char writeable_dir[PATH_MAX];
 
-	int timer_res; // timer resolution in msec
 	timer_pool *timers;
+	bool timers_dirty; // changed something in timers
 
 	int lua_gc;
 	int ref_desync_ctx; // desync ctx userdata registry ref

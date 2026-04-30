@@ -135,8 +135,7 @@ bool logical_net_filter_present(void);
 bool logical_net_filter_match(void);
 bool nlm_list(bool bAll);
 bool windivert_init(const char *filter);
-typedef void (*t_timer_callback)(uint64_t bt);
-bool windivert_recv(uint8_t *packet, size_t *len, WINDIVERT_ADDRESS *wa, unsigned int *wa_count, t_timer_callback timer_callback, uint64_t *bt_prev);
+bool windivert_recv(uint8_t *packet, size_t *len, WINDIVERT_ADDRESS *wa, unsigned int *wa_count, uint64_t *bt_next);
 bool windivert_send(const uint8_t *packet, size_t len, const WINDIVERT_ADDRESS *wa);
 #else
 #define ensure_dir_access(dir) ensure_file_access(dir)

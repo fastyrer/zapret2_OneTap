@@ -242,20 +242,27 @@ static int write_pidfile(FILE **Fpid)
 
 void NoInterceptLoop(void)
 {
-	useconds_t usec = params.timer_res * 1000;
+	uint64_t bt, bt_next;
+	useconds_t usec;
 
 	if (params.timers)
 	{
 		DLOG("processing timers\n");
 
+		bt_next = TimerPoolNext(params.timers, &params.timers_dirty);
 		while(params.timers)
 		{
 			if (bQuit) goto quit;
-			usleep(usec);
-			if (bQuit) goto quit;
+			bt = boottime_ms();
+			if (bt_next>bt)
+			{
+				usec = (useconds_t)(bt_next-bt)*1000U;
+				usleep(usec);
+				if (bQuit) goto quit;
+			}
 			ReloadCheck();
 			lua_do_gc();
-			TimerPoolRun(&params.timers, 0);
+			bt_next = TimerPoolRun(&params.timers, &params.timers_dirty, 0);
 		}
 	}
 	return;
@@ -442,8 +449,8 @@ static int nfq_main(void)
 	uint8_t *buf=NULL, *mod=NULL;
 	struct nfq_cb_data cbdata = { .sock = -1, .mod = NULL };
 	fd_set fdset;
-	struct timeval tv = {.tv_sec = params.timer_res/1000, .tv_usec = params.timer_res%1000*1000};
-	unsigned int bt,bt_prev,dbt;
+	struct timeval tv;
+	uint64_t bt,dbt,bt_next;
 
 	if (*params.pidfile && !(Fpid = fopen(params.pidfile, "w")))
 	{
@@ -519,7 +526,7 @@ static int nfq_main(void)
 	notify_ready();
 
 	fd = nfq_fd(h);
-	bt_prev=0;
+	bt_next = bt = 0;
 	do
 	{
 		if (bQuit) goto quit;
@@ -527,6 +534,12 @@ static int nfq_main(void)
 		{
 			if (params.timers)
 			{
+				if (!bt_next) bt_next = TimerPoolNext(params.timers, &params.timers_dirty);
+				bt = boottime_ms();
+				dbt = bt_next>bt ? bt_next-bt : 0;
+				tv.tv_sec = (time_t)(dbt/1000);
+				tv.tv_usec = (suseconds_t)(dbt%1000*1000);
+
 				FD_ZERO(&fdset);
 				FD_SET(fd, &fdset);
 				res = select(fd+1, &fdset, NULL, NULL, &tv);
@@ -540,6 +553,7 @@ static int nfq_main(void)
 			}
 			else
 			{
+				bt_next = bt = 0;
 				if (bQuit) goto quit;
 				res = 1;
 			}
@@ -566,21 +580,10 @@ static int nfq_main(void)
 			if (params.timers)
 			{
 				bt = boottime_ms();
-				dbt = bt-bt_prev;
-				if (dbt>=params.timer_res)
-				{
-					TimerPoolRun(&params.timers, bt);
-
-					bt_prev = bt;
-					tv.tv_sec = params.timer_res/1000;
-					tv.tv_usec = params.timer_res%1000*1000;
-				}
-				else
-				{
-					dbt = params.timer_res-dbt;
-					tv.tv_sec = (time_t)(dbt/1000);
-					tv.tv_usec = (suseconds_t)(dbt%1000*1000);
-				}
+				if (bt>=bt_next)
+					bt_next = TimerPoolRun(&params.timers, &params.timers_dirty, bt);
+				else if (params.timers_dirty)
+					bt_next = 0;
 			}
 		}
 		if (errno==EINTR)
@@ -629,8 +632,8 @@ static int dvt_main(void)
 	struct sockaddr_in6 bp6;
 	uint8_t buf[RECONSTRUCT_MAX_SIZE] __attribute__((aligned));
 	fd_set fdset;
-	struct timeval tv = {.tv_sec = params.timer_res/1000, .tv_usec = params.timer_res%1000*1000};
-	unsigned int bt,bt_prev,dbt;
+	struct timeval tv;
+	uint64_t bt,bt_next,dbt;
 
 	if (*params.pidfile && !(Fpid = fopen(params.pidfile, "w")))
 	{
@@ -714,16 +717,29 @@ static int dvt_main(void)
 	if (params.daemon) daemonize();
 	if (!write_pidfile(&Fpid)) goto exiterr;
 
-	for (bt_prev=0;;)
+	for (bt=bt_next=0;;)
 	{
 		if (bQuit)
 		{
 			DLOG_CONDUP("quit requested\n");
 			goto exitok;
 		}
+
 		FD_ZERO(&fdset);
 		for (i = 0; i < fdct; i++) FD_SET(fd[i], &fdset);
-		r = select(fdmax, &fdset, NULL, NULL, params.timers ? &tv : NULL);
+
+		if (params.timers)
+		{
+			if (!bt_next) bt_next = TimerPoolNext(params.timers, &params.timers_dirty);
+			bt = boottime_ms();
+			dbt = bt_next>bt ? bt_next-bt : 0;
+			tv.tv_sec = (time_t)(dbt/1000);
+			tv.tv_usec = (suseconds_t)(dbt%1000*1000);
+			r = select(fdmax, &fdset, NULL, NULL, &tv);
+		}
+		else
+			r = select(fdmax, &fdset, NULL, NULL, NULL);
+
 		if (bQuit)
 		{
 			DLOG_CONDUP("quit requested\n");
@@ -810,21 +826,10 @@ static int dvt_main(void)
 		if (params.timers)
 		{
 			bt = boottime_ms();
-			dbt = bt-bt_prev;
-			if (dbt>=params.timer_res)
-			{
-				TimerPoolRun(&params.timers, bt);
-
-				bt_prev = bt;
-				tv.tv_sec = params.timer_res/1000;
-				tv.tv_usec = params.timer_res%1000*1000;
-			}
-			else
-			{
-				dbt = params.timer_res-dbt;
-				tv.tv_sec = (time_t)(dbt/1000);
-				tv.tv_usec = (suseconds_t)(dbt%1000*1000);
-			}
+			if (bt>=bt_next)
+				bt_next = TimerPoolRun(&params.timers, &params.timers_dirty, bt);
+			else if (params.timers_dirty)
+				bt_next = 0;
 		}
 	}
 
@@ -846,11 +851,6 @@ exiterr:
 // do not make it less than 65536 - loopback packets can be up to 64K
 #define WINDIVERT_PACKET_BUF_SIZE	196608 // 3*64K, 128*1500=192000
 
-static void win_timer_callback(uint64_t bt)
-{
-	TimerPoolRun(&params.timers, bt);
-}
-
 static int win_main(void)
 {
 	size_t len, packet_len, left, modlen;
@@ -863,7 +863,7 @@ static int win_main(void)
 	WINDIVERT_ADDRESS wa[WINDIVERT_BULK_MAX];
 	uint8_t *packets = NULL, *packet, *mod=NULL;
 	unsigned int n,wa_count;
-	uint64_t bt_prev = 0;
+	uint64_t bt_next;
 
 	// windows emulated fork logic does not cover objects outside of cygwin world. have to daemonize before inits
 	if (params.daemon) daemonize();
@@ -933,11 +933,12 @@ static int win_main(void)
 			goto ex;
 		}
 
+		bt_next = 0;
 		for (id = 0;;)
 		{
 			len = WINDIVERT_PACKET_BUF_SIZE;
 			wa_count = WINDIVERT_BULK_MAX;
-			if (!windivert_recv(packets, &len, wa, &wa_count, win_timer_callback, &bt_prev))
+			if (!windivert_recv(packets, &len, wa, &wa_count, &bt_next))
 			{
 				if (errno == ENOBUFS)
 				{
@@ -1839,7 +1840,6 @@ static void exithelp(void)
 		" --ipcache-lifetime=<int>\t\t\t\t; time in seconds to keep cached hop count and domain name (default %u). 0 = no expiration\n"
 		" --ipcache-hostname=[0|1]\t\t\t\t; 1 or no argument enables ip->hostname caching\n"
 		" --reasm-disable=[type[,type]]\t\t\t\t; disable reasm for these L7 payloads : tls_client_hello quic_initial . if no argument - disable all reasm.\n"
-		" --timer-res=msec\t\t\t\t\t; Lua timer resolution. default %d ms\n"
 #ifdef __CYGWIN__
 		"\nWINDIVERT FILTER:\n"
 		" --wf-iface=<int>[.<int>]\t\t\t\t; numeric network interface and subinterface indexes\n"
@@ -1915,7 +1915,6 @@ static void exithelp(void)
 #endif
 		CTRACK_T_SYN, CTRACK_T_EST, CTRACK_T_FIN, CTRACK_T_UDP,
 		IPCACHE_LIFETIME,
-		TIMER_RES_DEFAULT,
 		LUA_GC_INTERVAL,
 		all_protos,
 		HOSTLIST_AUTO_FAIL_THRESHOLD_DEFAULT, HOSTLIST_AUTO_FAIL_TIME_DEFAULT,
@@ -1998,7 +1997,6 @@ enum opt_indices {
 	IDX_IPCACHE_LIFETIME,
 	IDX_IPCACHE_HOSTNAME,
 	IDX_REASM_DISABLE,
-	IDX_TIMER_RES,
 #ifdef __linux__
 	IDX_FWMARK,
 #elif defined(SO_USER_COOKIE)
@@ -2104,7 +2102,6 @@ static const struct option long_options[] = {
 	[IDX_IPCACHE_LIFETIME] = {"ipcache-lifetime", required_argument, 0, 0},
 	[IDX_IPCACHE_HOSTNAME] = {"ipcache-hostname", optional_argument, 0, 0},
 	[IDX_REASM_DISABLE] = {"reasm-disable", optional_argument, 0, 0},
-	[IDX_TIMER_RES] = {"timer-res", required_argument, 0, 0},
 #ifdef __linux__
 	[IDX_FWMARK] = {"fwmark", required_argument, 0, 0},
 #elif defined(SO_USER_COOKIE)
@@ -2506,14 +2503,6 @@ int main(int argc, char **argv)
 			}
 			else
 				params.reasm_payload_disable = L7P_ALL;
-			break;
-		case IDX_TIMER_RES:
-			params.timer_res = atoi(optarg);
-			if (params.timer_res<10)
-			{
-				DLOG_ERR("Invalid timer resolution. must be >=10 ms\n");
-				exit_clean(1);
-			}
 			break;
 #if defined(__linux__)
 		case IDX_FWMARK:

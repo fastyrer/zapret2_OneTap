@@ -77,22 +77,40 @@ static bool TimerPoolRunTimer(timer_pool *p)
 	}
 	return true;
 }
-void TimerPoolRun(timer_pool **pp, uint64_t bt)
+uint64_t TimerPoolNext(const timer_pool *p, bool *dirty)
 {
-	if (!pp) return; // no timers
+	const timer_pool *elem, *tmp;
+	uint64_t nexttime, mintime=0x7FFFFFFFFFFFFFFF;
 
-	if (!bt) bt = boottime_ms();
+	if (!p) return 0;
+
+	HASH_ITER(hh, p, elem, tmp)
+	{
+		nexttime = elem->bt_prev + elem->period;
+		if (nexttime<mintime) mintime = nexttime;
+	}
+	*dirty = false;
+	return mintime;
+}
+uint64_t TimerPoolRun(timer_pool **pp, bool *dirty, uint64_t bt)
+{
+	*dirty = false;
+	if (!*pp) return 0; // no timers
 
 	timer_pool *elem, *tmp, *p;
 	char *name;
 	const char *del;
 	unsigned int n;
+	uint64_t nexttime, mintime=0x7FFFFFFFFFFFFFFF;
+
+	if (!bt) bt = boottime_ms();
 	HASH_ITER(hh, *pp, elem, tmp)
 	{
-		if (bt >= (elem->bt_prev + elem->period))
+		nexttime = elem->bt_prev + elem->period;
+		if (bt >= nexttime)
 		{
 			if (!(name = strdup(elem->str)))
-				return;
+				return 0;
 			n = elem->n;
 
 			del = NULL;
@@ -110,12 +128,26 @@ void TimerPoolRun(timer_pool **pp, uint64_t bt)
 				{
 					DLOG(del,name);
 					TimerPoolDel(pp, elem);
+					elem = NULL;
 				}
 				else
+				{
 					elem->bt_prev = bt;
+					nexttime = elem->bt_prev + elem->period;
+				}
 			}
 
 			free(name);
 		}
+		if (elem)
+		{
+			if (nexttime<mintime) mintime = nexttime;
+		}
 	}
+	if (!*pp) return 0; // no timers
+	if (*dirty)
+		// something changed in the timer pool (deleted or added in the lua timer code)
+		// rescan all timers for mintime
+		mintime = TimerPoolNext(*pp, dirty);
+	return mintime;
 }

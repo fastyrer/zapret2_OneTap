@@ -20,6 +20,8 @@
 #include "nfqws.h"
 
 #ifdef __CYGWIN__
+#include "timer.h"
+
 #include <sys/cygwin.h>
 
 #include <wlanapi.h>
@@ -1627,32 +1629,34 @@ static bool windivert_recv_exit(void)
 	}
 	return false;
 }
-static DWORD win_timer_check(t_timer_callback timer_callback, uint64_t *bt_prev)
-{
-	uint64_t bt,dbt;
 
-	bt = boottime_ms();
-	dbt = bt-*bt_prev;
-	if (dbt>=params.timer_res)
-	{
-		timer_callback(bt);
-
-		*bt_prev = bt;
-		return params.timer_res;
-	}
-	else
-		return params.timer_res-(int)dbt;
-}
-
-static bool windivert_recv_filter(HANDLE hFilter, uint8_t *packet, size_t *len, WINDIVERT_ADDRESS *wa, unsigned int *wa_count, t_timer_callback timer_callback, uint64_t *bt_prev)
+static bool windivert_recv_filter(HANDLE hFilter, uint8_t *packet, size_t *len, WINDIVERT_ADDRESS *wa, unsigned int *wa_count, uint64_t *bt_next)
 {
 	UINT recv_len;
 	DWORD rd,twait,tmax;
 	unsigned int wac;
+	uint64_t bt;
 
-	if (windivert_recv_exit()) return false;
+	if (windivert_recv_exit())
+		return false;
 
-	tmax = win_timer_check(timer_callback, bt_prev);
+	if (params.timers)
+	{
+		if (!*bt_next) *bt_next = TimerPoolNext(params.timers, &params.timers_dirty);
+		bt = boottime_ms();
+		tmax = *bt_next>bt ? (DWORD)(*bt_next-bt) : 0;
+		if (!tmax || params.timers_dirty)
+		{
+			*bt_next = TimerPoolRun(&params.timers, &params.timers_dirty, bt);
+			bt = boottime_ms();
+			tmax = *bt_next>bt ? (DWORD)(*bt_next-bt) : 0;
+		}
+	}
+	else
+	{
+		*bt_next = 0;
+		tmax = 0;
+	}
 
 	wac = *wa_count * sizeof(WINDIVERT_ADDRESS);
 	if (WinDivertRecvEx(hFilter, packet, *len, &recv_len, 0, wa, &wac, &ovl))
@@ -1669,13 +1673,24 @@ static bool windivert_recv_filter(HANDLE hFilter, uint8_t *packet, size_t *len, 
 			// need to check for signals periodically
 			for(;;)
 			{
-				twait = tmax>50 ? 50 : tmax;
-				tmax -= twait;
+				if (params.timers)
+				{
+					twait = tmax>50 ? 50 : tmax;
+					tmax -= twait;
+				}
+				else
+					twait = 50;
 				// make signals working
 				if (WaitForSingleObject(ovl.hEvent,twait)!=WAIT_TIMEOUT) break;
 				if (windivert_recv_exit())
 					return false;
-				if (!tmax) tmax = win_timer_check(timer_callback, bt_prev);
+				if (params.timers && !tmax)
+				{
+					bt = boottime_ms();
+					*bt_next = TimerPoolRun(&params.timers, &params.timers_dirty, bt);
+					bt = boottime_ms();
+					tmax = *bt_next>bt ? (DWORD)(*bt_next-bt) : 0;
+				}
 			}
 			if (!GetOverlappedResult(hFilter,&ovl,&rd,FALSE))
 			{
@@ -1700,9 +1715,9 @@ cancel:
 	GetOverlappedResult(hFilter, &ovl, &rd, TRUE);
 	return false;
 }
-bool windivert_recv(uint8_t *packet, size_t *len, WINDIVERT_ADDRESS *wa, unsigned int *wa_count, t_timer_callback timer_callback, uint64_t *bt_prev)
+bool windivert_recv(uint8_t *packet, size_t *len, WINDIVERT_ADDRESS *wa, unsigned int *wa_count, uint64_t *bt_next)
 {
-	return windivert_recv_filter(w_filter,packet,len,wa,wa_count,timer_callback,bt_prev);
+	return windivert_recv_filter(w_filter,packet,len,wa,wa_count,bt_next);
 }
 
 static bool windivert_send_filter(HANDLE hFilter, const uint8_t *packet, size_t len, const WINDIVERT_ADDRESS *wa)

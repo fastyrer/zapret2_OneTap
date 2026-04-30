@@ -3825,6 +3825,7 @@ static int luacall_timer_set(lua_State *L)
 		timer->lua_ref = luaL_ref(L, LUA_REGISTRYINDEX);
 	}
 	DLOG("timer: '%s' %s. function '%s' period %llu oneshot %u\n", timer->str, action, timer->func, timer->period, timer->oneshot);
+	params.timers_dirty = true;
 
 	LUA_STACK_GUARD_RETURN(L,0)
 }
@@ -3841,13 +3842,14 @@ static int luacall_timer_del(lua_State *L)
 	{
 		DLOG("timer: '%s' deleted\n", timer->str);
 		TimerPoolDel(&params.timers, timer);
+		params.timers_dirty = true;
 	}
 	else
 		DLOG("timer: '%s' not found\n", name);
 	lua_pushboolean(L, !!timer);
 	LUA_STACK_GUARD_RETURN(L,1)
 }
-static int lua_push_timer_info(lua_State *L, const timer_pool *timer)
+static void lua_push_timer_info(lua_State *L, const timer_pool *timer)
 {
 	lua_newtable(L);
 	if (timer->str) lua_pushf_str(L, "name", timer->str);
