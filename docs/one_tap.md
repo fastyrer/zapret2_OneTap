@@ -38,7 +38,7 @@ ONE_TAP_AUTOSCAN=0 sudo ./one_tap.sh
 Запуск из готового release bundle с Windows-бинарниками:
 
 ```cmd
-windows\one_tap_windows.cmd
+one_tap_windows.bat
 ```
 
 Что делает Windows-сценарий:
@@ -52,7 +52,7 @@ windows\one_tap_windows.cmd
 Повторный запуск использует сохранённую стратегию. Чтобы сбросить её к дефолтной:
 
 ```cmd
-windows\one_tap_windows.cmd -ResetStrategy
+one_tap_windows.bat -ResetStrategy
 ```
 
 Останов:
@@ -64,7 +64,7 @@ windows\stop_windows.cmd
 Самопроверка структуры без установки сервиса:
 
 ```cmd
-windows\one_tap_windows.cmd -SelfTest
+one_tap_windows.bat -SelfTest
 ```
 
 В source checkout Windows-бинарников обычно нет. Их нужно брать из release bundle или собирать по `docs\compile`.
