@@ -46,6 +46,7 @@ one_tap_windows.bat
 - проверяет права администратора и наличие `winws2.exe`, `cygwin1.dll`, `WinDivert.dll`, `WinDivert*.sys`;
 - если Windows-бинарников нет, пытается скачать их из GitHub Releases в `binaries\windows-x86_64` или `binaries\windows-x86`;
 - создаёт набор стратегий и проверяет их на YouTube/Telegram/Discord;
+- создаёт отдельный hostlist для Discord в `windows\state\discord-hosts.txt` и пробует Discord-ориентированные TLS/QUIC/media стратегии;
 - пока проверка не проходит, перезапускает `winws2` со следующей стратегией;
 - сохраняет первую рабочую стратегию в `windows\strategy.windows.args`;
 - создаёт итоговый `windows\winws2.args`;
@@ -79,6 +80,7 @@ one_tap_windows.bat -NoProbe
 Если окно закрылось слишком быстро, откройте `cmd.exe` в папке проекта и запустите ту же команду вручную. Логи пишутся в `windows\state\one_tap_windows_launcher.log` и `windows\state\one_tap_windows.log`.
 Отчёт проверки соединения пишется в `windows\state\connectivity-test.json`.
 Внутри каждой группы проверяются все URL, чтобы, например, Discord API не давал ложный успех при неработающем gateway/CDN.
+Если Discord не проходит, в предупреждении будет указан конкретный провалившийся URL.
 
 В source checkout Windows-бинарников обычно нет. Обычный запуск пытается скачать их автоматически. По умолчанию проверяются релизы `fastyrer/zapret2_OneTap`, затем `bol-van/zapret2`. Если нужен другой источник, задайте переменную:
 

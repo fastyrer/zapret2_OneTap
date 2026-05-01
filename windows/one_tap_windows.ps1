@@ -19,6 +19,7 @@ $ConfigFile = Join-Path $ScriptDir 'config.windows.ps1'
 $LogFile = Join-Path $StateDir 'one_tap_windows.log'
 $StrategyNameFile = Join-Path $StateDir 'strategy.windows.name'
 $ProbeReportFile = Join-Path $StateDir 'connectivity-test.json'
+$DiscordHostlistFile = Join-Path $StateDir 'discord-hosts.txt'
 $DefaultReleaseRepos = @('fastyrer/zapret2_OneTap', 'bol-van/zapret2')
 
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
@@ -38,6 +39,26 @@ function To-ZapretPath {
 	return ([System.IO.Path]::GetFullPath($Path) -replace '\\','/')
 }
 
+function Write-DiscordHostlist {
+	$Hosts = @(
+		'discord.com',
+		'discord.gg',
+		'discordapp.com',
+		'discordapp.net',
+		'discord.media',
+		'discordcdn.com',
+		'gateway.discord.gg',
+		'cdn.discordapp.com',
+		'media.discordapp.net'
+	)
+	New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+	Set-Content -LiteralPath $DiscordHostlistFile -Value $Hosts -Encoding ASCII
+}
+
+function Get-DiscordHostlistArg {
+	return '--hostlist="' + (To-ZapretPath $DiscordHostlistFile) + '"'
+}
+
 function Test-Admin {
 	$Identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 	$Principal = New-Object Security.Principal.WindowsPrincipal($Identity)
@@ -49,6 +70,8 @@ function Test-SourceLayout {
 		'lua\zapret-lib.lua',
 		'lua\zapret-antidpi.lua',
 		'files\fake\quic_initial_www_google_com.bin',
+		'init.d\windivert.filter.examples\windivert_part.discord_media.txt',
+		'init.d\windivert.filter.examples\windivert_part.stun.txt',
 		'init.d\windivert.filter.examples\windivert_part.quic_initial_ietf.txt'
 	)
 	$Ok = $true
@@ -281,6 +304,8 @@ function New-StrategyCandidate {
 }
 
 function Get-StrategyCandidates {
+	Write-DiscordHostlist
+	$DiscordHostlist = Get-DiscordHostlistArg
 	$Candidates = New-Object System.Collections.Generic.List[object]
 	if ((Test-Path -LiteralPath $StrategyFile) -and (-not $ResetStrategy)) {
 		$Saved = @(Get-Content -LiteralPath $StrategyFile | Where-Object { $_.Trim().Length -gt 0 -and -not $_.Trim().StartsWith('#') })
@@ -313,6 +338,30 @@ function Get-StrategyCandidates {
 	$Candidates.Add((New-StrategyCandidate 'tls-syndata-multisplit' @(
 		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=syndata:blob=fake_default_tls:tls_mod=rnd,dupsid,rndsni --lua-desync=multisplit:pos=midsld --new',
 		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+	)))
+	$Candidates.Add((New-StrategyCandidate 'discord-hostlist-google-fake' @(
+		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new',
+		('--filter-tcp=443 --filter-l7=tls ' + $DiscordHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid,sni=www.google.com:repeats=11 --lua-desync=multidisorder:pos=1,midsld --new'),
+		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new',
+		('--filter-udp=443 --filter-l7=quic ' + $DiscordHostlist + ' --payload=quic_initial --lua-desync=fake:blob=quic_google:repeats=11 --new'),
+		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new',
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
+	)))
+	$Candidates.Add((New-StrategyCandidate 'discord-hostlist-padencap' @(
+		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new',
+		('--filter-tcp=443 --filter-l7=tls ' + $DiscordHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid,padencap:repeats=4 --lua-desync=multidisorder:pos=1,midsld --new'),
+		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new',
+		('--filter-udp=443 --filter-l7=quic ' + $DiscordHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
+		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new',
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
+	)))
+	$Candidates.Add((New-StrategyCandidate 'discord-hostlist-syndata' @(
+		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new',
+		('--filter-tcp=443 --filter-l7=tls ' + $DiscordHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=syndata:blob=fake_default_tls:tls_mod=rnd,dupsid,rndsni --lua-desync=multisplit:pos=midsld --new'),
+		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new',
+		('--filter-udp=443 --filter-l7=quic ' + $DiscordHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
+		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new',
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
 	)))
 	$Candidates.Add((New-StrategyCandidate 'full-default' (Get-DefaultStrategyLines)))
 
@@ -361,6 +410,7 @@ function Write-RunConfig {
 
 	New-Item -ItemType Directory -Force -Path $ScriptDir | Out-Null
 	New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+	Write-DiscordHostlist
 	Ensure-StrategyFile
 
 	$Lines = New-Object System.Collections.Generic.List[string]
@@ -618,8 +668,16 @@ function Invoke-StrategySearch {
 				Info "Strategy selected: $($Candidate.Name)"
 				return
 			}
-			$FailedTargets = @($Report.Targets | Where-Object { -not $_.Ok } | ForEach-Object { $_.Name })
-			Write-Warning "Strategy $($Candidate.Name) failed connectivity test: $($FailedTargets -join ', ')"
+			$FailedDetails = @($Report.Targets | Where-Object { -not $_.Ok } | ForEach-Object {
+				$TargetName = $_.Name
+				$FailedUrls = @($_.Urls | Where-Object { -not $_.Ok } | ForEach-Object { "$($_.Url) ($($_.Detail))" })
+				if ($FailedUrls.Count -gt 0) {
+					"$TargetName`: $($FailedUrls -join '; ')"
+				} else {
+					$TargetName
+				}
+			})
+			Write-Warning "Strategy $($Candidate.Name) failed connectivity test: $($FailedDetails -join ' | ')"
 		} catch {
 			Write-Warning "Strategy $($Candidate.Name) failed to start or test: $($_.Exception.Message)"
 		}
