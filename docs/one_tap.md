@@ -45,7 +45,9 @@ one_tap_windows.bat
 
 - проверяет права администратора и наличие `winws2.exe`, `cygwin1.dll`, `WinDivert.dll`, `WinDivert*.sys`;
 - если Windows-бинарников нет, пытается скачать их из GitHub Releases в `binaries\windows-x86_64` или `binaries\windows-x86`;
-- создаёт `windows\strategy.windows.args`, если стратегии ещё нет;
+- создаёт набор стратегий и проверяет их на YouTube/Telegram;
+- пока проверка не проходит, перезапускает `winws2` со следующей стратегией;
+- сохраняет первую рабочую стратегию в `windows\strategy.windows.args`;
 - создаёт итоговый `windows\winws2.args`;
 - сохраняет пути в `windows\config.windows.ps1`;
 - ставит или обновляет сервис `winws2` и запускает его.
@@ -68,7 +70,14 @@ windows\stop_windows.cmd
 one_tap_windows.bat -SelfTest
 ```
 
+Запуск без автоматической проверки YouTube/Telegram:
+
+```cmd
+one_tap_windows.bat -NoProbe
+```
+
 Если окно закрылось слишком быстро, откройте `cmd.exe` в папке проекта и запустите ту же команду вручную. Логи пишутся в `windows\state\one_tap_windows_launcher.log` и `windows\state\one_tap_windows.log`.
+Отчёт проверки соединения пишется в `windows\state\connectivity-test.json`.
 
 В source checkout Windows-бинарников обычно нет. Обычный запуск пытается скачать их автоматически. По умолчанию проверяются релизы `fastyrer/zapret2_OneTap`, затем `bol-van/zapret2`. Если нужен другой источник, задайте переменную:
 

@@ -3,6 +3,7 @@ param(
 	[switch]$SelfTest,
 	[switch]$NoService,
 	[switch]$NoDownload,
+	[switch]$NoProbe,
 	[switch]$Stop,
 	[switch]$ResetStrategy
 )
@@ -16,6 +17,8 @@ $StrategyFile = Join-Path $ScriptDir 'strategy.windows.args'
 $ArgsFile = Join-Path $ScriptDir 'winws2.args'
 $ConfigFile = Join-Path $ScriptDir 'config.windows.ps1'
 $LogFile = Join-Path $StateDir 'one_tap_windows.log'
+$StrategyNameFile = Join-Path $StateDir 'strategy.windows.name'
+$ProbeReportFile = Join-Path $StateDir 'connectivity-test.json'
 $DefaultReleaseRepos = @('fastyrer/zapret2_OneTap', 'bol-van/zapret2')
 
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
@@ -257,18 +260,86 @@ function Install-WindowsRuntimeFromRelease {
 	throw "Automatic Windows runtime download failed. Last error: $LastError"
 }
 
-function Write-DefaultStrategy {
-	if ((Test-Path -LiteralPath $StrategyFile) -and (-not $ResetStrategy)) {
-		return
-	}
-
-	$Strategy = @(
+function Get-DefaultStrategyLines {
+	return @(
 		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5 --lua-desync=fakedsplit:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5 --new',
 		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000:repeats=6 --lua-desync=multidisorder:pos=midsld --new',
 		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new',
 		'--filter-l7=wireguard,stun,discord --payload=wireguard_initiation,wireguard_cookie,stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
 	)
-	Set-Content -LiteralPath $StrategyFile -Value $Strategy -Encoding ASCII
+}
+
+function New-StrategyCandidate {
+	param(
+		[Parameter(Mandatory = $true)][string]$Name,
+		[Parameter(Mandatory = $true)][string[]]$Lines
+	)
+	[pscustomobject]@{
+		Name = $Name
+		Lines = $Lines
+	}
+}
+
+function Get-StrategyCandidates {
+	$Candidates = New-Object System.Collections.Generic.List[object]
+	if ((Test-Path -LiteralPath $StrategyFile) -and (-not $ResetStrategy)) {
+		$Saved = @(Get-Content -LiteralPath $StrategyFile | Where-Object { $_.Trim().Length -gt 0 -and -not $_.Trim().StartsWith('#') })
+		if ($Saved.Count -gt 0) {
+			$SavedName = 'saved'
+			if (Test-Path -LiteralPath $StrategyNameFile) {
+				$SavedName = 'saved-' + ((Get-Content -LiteralPath $StrategyNameFile -TotalCount 1) -replace '[^A-Za-z0-9_.-]', '_')
+			}
+			$Candidates.Add((New-StrategyCandidate $SavedName $Saved))
+		}
+	}
+
+	$Candidates.Add((New-StrategyCandidate 'tcp-light-multisplit' @(
+		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new',
+		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld'
+	)))
+	$Candidates.Add((New-StrategyCandidate 'tcp-md5-fake-multisplit' @(
+		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --lua-desync=multisplit:pos=method+2 --new',
+		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2'
+	)))
+	$Candidates.Add((New-StrategyCandidate 'tcp-quic-md5-fake' @(
+		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --lua-desync=multisplit:pos=method+2 --new',
+		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2 --new',
+		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+	)))
+	$Candidates.Add((New-StrategyCandidate 'tls-timestamp-quic-fake' @(
+		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_ts=-1000 --new',
+		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+	)))
+	$Candidates.Add((New-StrategyCandidate 'tls-syndata-multisplit' @(
+		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=syndata:blob=fake_default_tls:tls_mod=rnd,dupsid,rndsni --lua-desync=multisplit:pos=midsld --new',
+		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+	)))
+	$Candidates.Add((New-StrategyCandidate 'full-default' (Get-DefaultStrategyLines)))
+
+	$Seen = @{}
+	$Unique = New-Object System.Collections.Generic.List[object]
+	foreach ($Candidate in $Candidates) {
+		$Key = ($Candidate.Lines -join "`n")
+		if (-not $Seen.ContainsKey($Key)) {
+			$Seen[$Key] = $true
+			$Unique.Add($Candidate)
+		}
+	}
+	return $Unique
+}
+
+function Save-StrategyCandidate {
+	param([Parameter(Mandatory = $true)]$Candidate)
+
+	Set-Content -LiteralPath $StrategyFile -Value $Candidate.Lines -Encoding ASCII
+	Set-Content -LiteralPath $StrategyNameFile -Value $Candidate.Name -Encoding ASCII
+}
+
+function Ensure-StrategyFile {
+	if (Test-Path -LiteralPath $StrategyFile) {
+		return
+	}
+	Save-StrategyCandidate (New-StrategyCandidate 'full-default' (Get-DefaultStrategyLines))
 }
 
 function Add-ExistingArgFile {
@@ -283,11 +354,14 @@ function Add-ExistingArgFile {
 }
 
 function Write-RunConfig {
-	param([Parameter(Mandatory = $true)][string]$Exe)
+	param(
+		[Parameter(Mandatory = $true)][string]$Exe,
+		[string]$StrategyName = ''
+	)
 
 	New-Item -ItemType Directory -Force -Path $ScriptDir | Out-Null
 	New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
-	Write-DefaultStrategy
+	Ensure-StrategyFile
 
 	$Lines = New-Object System.Collections.Generic.List[string]
 	$Lines.Add('--wf-tcp-out=80,443')
@@ -318,6 +392,7 @@ function Write-RunConfig {
 		'$ArgsFile = ' + "'" + $ArgsFile.Replace("'", "''") + "'",
 		'$StrategyFile = ' + "'" + $StrategyFile.Replace("'", "''") + "'",
 		'$ServiceName = ' + "'" + $ServiceName + "'",
+		'$StrategyName = ' + "'" + $StrategyName.Replace("'", "''") + "'",
 		'$LastConfigured = ' + "'" + (Get-Date -Format s) + "'"
 	)
 	Set-Content -LiteralPath $ConfigFile -Value $Config -Encoding ASCII
@@ -366,6 +441,167 @@ function Install-Winws2Service {
 	Start-Service -Name $ServiceName
 }
 
+function Get-EnvInt {
+	param(
+		[Parameter(Mandatory = $true)][string]$Name,
+		[Parameter(Mandatory = $true)][int]$Default
+	)
+
+	$Value = [Environment]::GetEnvironmentVariable($Name)
+	if (-not $Value) {
+		return $Default
+	}
+	$Parsed = 0
+	if ([int]::TryParse($Value, [ref]$Parsed) -and $Parsed -gt 0) {
+		return $Parsed
+	}
+	return $Default
+}
+
+function New-ProbeTarget {
+	param(
+		[Parameter(Mandatory = $true)][string]$Name,
+		[Parameter(Mandatory = $true)][string[]]$Urls
+	)
+	[pscustomobject]@{
+		Name = $Name
+		Urls = $Urls
+	}
+}
+
+function Get-ConnectivityTargets {
+	return @(
+		(New-ProbeTarget 'YouTube' @(
+			'https://www.youtube.com/generate_204',
+			'https://www.youtube.com/robots.txt'
+		)),
+		(New-ProbeTarget 'Telegram' @(
+			'https://api.telegram.org',
+			'https://web.telegram.org'
+		))
+	)
+}
+
+function Test-UrlReachable {
+	param(
+		[Parameter(Mandatory = $true)][string]$Url,
+		[Parameter(Mandatory = $true)][int]$TimeoutSec
+	)
+
+	try {
+		$Response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec -MaximumRedirection 3
+		return [pscustomobject]@{
+			Ok = $true
+			Url = $Url
+			Detail = "HTTP $($Response.StatusCode)"
+		}
+	} catch {
+		$Response = $_.Exception.Response
+		if ($Response) {
+			$StatusCode = ''
+			try {
+				$StatusCode = [int]$Response.StatusCode
+			} catch {
+				$StatusCode = $Response.StatusCode
+			}
+			return [pscustomobject]@{
+				Ok = $true
+				Url = $Url
+				Detail = "HTTP $StatusCode"
+			}
+		}
+		return [pscustomobject]@{
+			Ok = $false
+			Url = $Url
+			Detail = $_.Exception.Message
+		}
+	}
+}
+
+function Test-ConnectivityTargets {
+	$TimeoutSec = Get-EnvInt 'ZAPRET2_PROBE_TIMEOUT_SEC' 6
+	$TargetResults = New-Object System.Collections.Generic.List[object]
+
+	foreach ($Target in Get-ConnectivityTargets) {
+		Info "Testing $($Target.Name)"
+		$UrlResults = New-Object System.Collections.Generic.List[object]
+		$TargetOk = $false
+		foreach ($Url in $Target.Urls) {
+			$UrlResult = Test-UrlReachable $Url $TimeoutSec
+			$UrlResults.Add($UrlResult)
+			if ($UrlResult.Ok) {
+				$TargetOk = $true
+				break
+			}
+		}
+		$TargetResults.Add([pscustomobject]@{
+			Name = $Target.Name
+			Ok = $TargetOk
+			Urls = @($UrlResults)
+		})
+	}
+
+	$Ok = $true
+	foreach ($TargetResult in $TargetResults) {
+		if (-not $TargetResult.Ok) {
+			$Ok = $false
+			break
+		}
+	}
+
+	$Report = [pscustomobject]@{
+		Ok = $Ok
+		CheckedAt = (Get-Date -Format s)
+		Targets = @($TargetResults)
+	}
+	$Report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ProbeReportFile -Encoding ASCII
+	return $Report
+}
+
+function Start-Winws2Runner {
+	param(
+		[Parameter(Mandatory = $true)][string]$Exe,
+		[Parameter(Mandatory = $true)][string]$StrategyName
+	)
+
+	Write-RunConfig $Exe $StrategyName
+	if ($NoService) {
+		Stop-Winws2
+		Info 'Config saved. Starting winws2 in a minimized process.'
+		& (Join-Path $ScriptDir 'start_windows.ps1')
+	} else {
+		Install-Winws2Service $Exe
+	}
+}
+
+function Invoke-StrategySearch {
+	param([Parameter(Mandatory = $true)][string]$Exe)
+
+	$Candidates = @(Get-StrategyCandidates)
+	$DelaySec = Get-EnvInt 'ZAPRET2_PROBE_START_DELAY_SEC' 4
+
+	foreach ($Candidate in $Candidates) {
+		Info "Trying strategy: $($Candidate.Name)"
+		Save-StrategyCandidate $Candidate
+		try {
+			Start-Winws2Runner $Exe $Candidate.Name
+			Start-Sleep -Seconds $DelaySec
+			$Report = Test-ConnectivityTargets
+			if ($Report.Ok) {
+				Info "Strategy selected: $($Candidate.Name)"
+				return
+			}
+			$FailedTargets = @($Report.Targets | Where-Object { -not $_.Ok } | ForEach-Object { $_.Name })
+			Write-Warning "Strategy $($Candidate.Name) failed connectivity test: $($FailedTargets -join ', ')"
+		} catch {
+			Write-Warning "Strategy $($Candidate.Name) failed to start or test: $($_.Exception.Message)"
+		}
+	}
+
+	Stop-Winws2
+	throw "No built-in Windows strategy passed YouTube/Telegram connectivity tests. Service was stopped to keep normal connectivity. See $ProbeReportFile"
+}
+
 if ($Stop) {
 	if (-not (Test-Admin)) {
 		Write-Error 'Administrator rights are required to stop winws2.'
@@ -407,13 +643,19 @@ if (-not $Exe -or -not $RuntimeOk) {
 	throw 'Windows binaries are not ready. Automatic download failed or was disabled. Put winws2.exe, cygwin1.dll, WinDivert.dll and WinDivert*.sys into binaries\windows-x86_64 or binaries\windows-x86, or build Windows artifacts from docs\compile.'
 }
 
-Write-RunConfig $Exe
-if ($NoService) {
-	Info 'Config saved. Starting winws2 in a minimized process.'
-	& (Join-Path $ScriptDir 'start_windows.ps1')
+if ($NoProbe) {
+	if ($ResetStrategy -or -not (Test-Path -LiteralPath $StrategyFile)) {
+		Save-StrategyCandidate (New-StrategyCandidate 'full-default' (Get-DefaultStrategyLines))
+	}
+	$StrategyName = 'manual'
+	if (Test-Path -LiteralPath $StrategyNameFile) {
+		$StrategyName = Get-Content -LiteralPath $StrategyNameFile -TotalCount 1
+	}
+	Start-Winws2Runner $Exe $StrategyName
 } else {
-	Install-Winws2Service $Exe
+	Invoke-StrategySearch $Exe
 }
 
 Info "Saved config: $ConfigFile"
 Info "Saved strategy: $StrategyFile"
+Info "Connectivity report: $ProbeReportFile"
