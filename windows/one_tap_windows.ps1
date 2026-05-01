@@ -494,21 +494,35 @@ function Test-UrlReachable {
 		[Parameter(Mandatory = $true)][int]$TimeoutSec
 	)
 
+	$Response = $null
 	try {
-		$Response = Invoke-WebRequest -Uri $Url -UseBasicParsing -TimeoutSec $TimeoutSec -MaximumRedirection 3
+		[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+		$Request = [Net.WebRequest]::Create($Url)
+		$Request.Method = 'GET'
+		$Request.Timeout = $TimeoutSec * 1000
+		$Request.ReadWriteTimeout = $TimeoutSec * 1000
+		$Request.UserAgent = 'zapret2-one-tap'
+		if ($Request -is [Net.HttpWebRequest]) {
+			$Request.AllowAutoRedirect = $true
+			$Request.MaximumAutomaticRedirections = 3
+		}
+		$Response = $Request.GetResponse()
+		$StatusCode = 'OK'
+		if ($Response -is [Net.HttpWebResponse]) {
+			$StatusCode = [int]$Response.StatusCode
+		}
 		return [pscustomobject]@{
 			Ok = $true
 			Url = $Url
-			Detail = "HTTP $($Response.StatusCode)"
+			Detail = "HTTP $StatusCode"
 		}
 	} catch {
 		$Response = $_.Exception.Response
 		if ($Response) {
-			$StatusCode = ''
+			$StatusCode = 'response'
 			try {
 				$StatusCode = [int]$Response.StatusCode
 			} catch {
-				$StatusCode = $Response.StatusCode
 			}
 			return [pscustomobject]@{
 				Ok = $true
@@ -521,30 +535,37 @@ function Test-UrlReachable {
 			Url = $Url
 			Detail = $_.Exception.Message
 		}
+	} finally {
+		if ($Response) {
+			try {
+				$Response.Close()
+			} catch {
+			}
+		}
 	}
 }
 
 function Test-ConnectivityTargets {
 	$TimeoutSec = Get-EnvInt 'ZAPRET2_PROBE_TIMEOUT_SEC' 6
-	$TargetResults = New-Object System.Collections.Generic.List[object]
+	$TargetResults = @()
 
 	foreach ($Target in Get-ConnectivityTargets) {
 		Info "Testing $($Target.Name)"
-		$UrlResults = New-Object System.Collections.Generic.List[object]
+		$UrlResults = @()
 		$TargetOk = $false
 		foreach ($Url in $Target.Urls) {
 			$UrlResult = Test-UrlReachable $Url $TimeoutSec
-			$UrlResults.Add($UrlResult)
+			$UrlResults += $UrlResult
 			if ($UrlResult.Ok) {
 				$TargetOk = $true
 				break
 			}
 		}
-		$TargetResults.Add([pscustomobject]@{
+		$TargetResults += [pscustomobject]@{
 			Name = $Target.Name
 			Ok = $TargetOk
 			Urls = @($UrlResults)
-		})
+		}
 	}
 
 	$Ok = $true
