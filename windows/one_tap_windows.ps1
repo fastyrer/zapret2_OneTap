@@ -14,6 +14,14 @@ $StateDir = Join-Path $ScriptDir 'state'
 $StrategyFile = Join-Path $ScriptDir 'strategy.windows.args'
 $ArgsFile = Join-Path $ScriptDir 'winws2.args'
 $ConfigFile = Join-Path $ScriptDir 'config.windows.ps1'
+$LogFile = Join-Path $StateDir 'one_tap_windows.log'
+
+New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+try {
+	Start-Transcript -Path $LogFile -Append | Out-Null
+} catch {
+	Write-Warning "Could not start transcript log: $LogFile"
+}
 
 function Info {
 	param([string]$Message)

@@ -67,6 +67,8 @@ windows\stop_windows.cmd
 one_tap_windows.bat -SelfTest
 ```
 
+Если окно закрылось слишком быстро, откройте `cmd.exe` в папке проекта и запустите ту же команду вручную. Логи пишутся в `windows\state\one_tap_windows_launcher.log` и `windows\state\one_tap_windows.log`.
+
 В source checkout Windows-бинарников обычно нет. Их нужно брать из release bundle или собирать по `docs\compile`.
 
 ## macOS
