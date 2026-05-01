@@ -539,6 +539,19 @@ function Get-ConnectivityTargets {
 	)
 }
 
+function Get-HttpResponseFromException {
+	param([Parameter(Mandatory = $true)][System.Exception]$Exception)
+
+	$Current = $Exception
+	while ($Current) {
+		if (($Current -is [System.Net.WebException]) -and $Current.Response) {
+			return $Current.Response
+		}
+		$Current = $Current.InnerException
+	}
+	return $null
+}
+
 function Test-UrlReachable {
 	param(
 		[Parameter(Mandatory = $true)][string]$Url,
@@ -568,7 +581,7 @@ function Test-UrlReachable {
 			Detail = "HTTP $StatusCode"
 		}
 	} catch {
-		$Response = $_.Exception.Response
+		$Response = Get-HttpResponseFromException $_.Exception
 		if ($Response) {
 			$StatusCode = 'response'
 			try {
