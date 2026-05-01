@@ -482,6 +482,7 @@ function Get-ConnectivityTargets {
 		(New-ProbeTarget 'Discord' @(
 			'https://discord.com/api/v9/experiments',
 			'https://discord.com',
+			'https://discord.com/api/v9/gateway',
 			'https://gateway.discord.gg',
 			'https://cdn.discordapp.com'
 		))
@@ -552,13 +553,12 @@ function Test-ConnectivityTargets {
 	foreach ($Target in Get-ConnectivityTargets) {
 		Info "Testing $($Target.Name)"
 		$UrlResults = @()
-		$TargetOk = $false
+		$TargetOk = $true
 		foreach ($Url in $Target.Urls) {
 			$UrlResult = Test-UrlReachable $Url $TimeoutSec
 			$UrlResults += $UrlResult
-			if ($UrlResult.Ok) {
-				$TargetOk = $true
-				break
+			if (-not $UrlResult.Ok) {
+				$TargetOk = $false
 			}
 		}
 		$TargetResults += [pscustomobject]@{

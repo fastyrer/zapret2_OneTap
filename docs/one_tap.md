@@ -78,6 +78,7 @@ one_tap_windows.bat -NoProbe
 
 Если окно закрылось слишком быстро, откройте `cmd.exe` в папке проекта и запустите ту же команду вручную. Логи пишутся в `windows\state\one_tap_windows_launcher.log` и `windows\state\one_tap_windows.log`.
 Отчёт проверки соединения пишется в `windows\state\connectivity-test.json`.
+Внутри каждой группы проверяются все URL, чтобы, например, Discord API не давал ложный успех при неработающем gateway/CDN.
 
 В source checkout Windows-бинарников обычно нет. Обычный запуск пытается скачать их автоматически. По умолчанию проверяются релизы `fastyrer/zapret2_OneTap`, затем `bol-van/zapret2`. Если нужен другой источник, задайте переменную:
 
