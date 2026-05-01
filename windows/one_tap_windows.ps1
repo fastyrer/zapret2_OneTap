@@ -338,7 +338,11 @@ function Stop-Winws2 {
 			}
 		}
 	}
-	taskkill.exe /IM winws2.exe /F 2>$null | Out-Null
+	$Processes = @(Get-Process -Name winws2 -ErrorAction SilentlyContinue)
+	if ($Processes.Count -gt 0) {
+		Info "Stopping existing winws2 process"
+		$Processes | Stop-Process -Force -ErrorAction SilentlyContinue
+	}
 }
 
 function Install-Winws2Service {
