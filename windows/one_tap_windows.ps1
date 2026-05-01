@@ -20,6 +20,7 @@ $LogFile = Join-Path $StateDir 'one_tap_windows.log'
 $StrategyNameFile = Join-Path $StateDir 'strategy.windows.name'
 $ProbeReportFile = Join-Path $StateDir 'connectivity-test.json'
 $DiscordHostlistFile = Join-Path $StateDir 'discord-hosts.txt'
+$TargetHostlistFile = Join-Path $StateDir 'one-tap-target-hosts.txt'
 $DefaultReleaseRepos = @('fastyrer/zapret2_OneTap', 'bol-van/zapret2')
 
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
@@ -39,8 +40,8 @@ function To-ZapretPath {
 	return ([System.IO.Path]::GetFullPath($Path) -replace '\\','/')
 }
 
-function Write-DiscordHostlist {
-	$Hosts = @(
+function Get-DiscordHosts {
+	return @(
 		'discord.com',
 		'discord.gg',
 		'discordapp.com',
@@ -51,12 +52,67 @@ function Write-DiscordHostlist {
 		'cdn.discordapp.com',
 		'media.discordapp.net'
 	)
+}
+
+function Write-DiscordHostlist {
+	$Hosts = Get-DiscordHosts
 	New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 	Set-Content -LiteralPath $DiscordHostlistFile -Value $Hosts -Encoding ASCII
 }
 
 function Get-DiscordHostlistArg {
 	return '--hostlist="' + (To-ZapretPath $DiscordHostlistFile) + '"'
+}
+
+function Write-TargetHostlist {
+	$Hosts = @(
+		'youtube.com',
+		'youtu.be',
+		'youtube-nocookie.com',
+		'googlevideo.com',
+		'ytimg.com',
+		'ggpht.com',
+		'youtubei.googleapis.com',
+		'youtube.googleapis.com',
+		'telegram.org',
+		'telegram.me',
+		't.me',
+		'telegra.ph',
+		'tdesktop.com',
+		'telegram-cdn.org'
+	) + (Get-DiscordHosts)
+	New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+	Set-Content -LiteralPath $TargetHostlistFile -Value (@($Hosts | Select-Object -Unique)) -Encoding ASCII
+}
+
+function Get-TargetHostlistArg {
+	return '--hostlist="' + (To-ZapretPath $TargetHostlistFile) + '"'
+}
+
+function Test-EnvFlag {
+	param([Parameter(Mandatory = $true)][string]$Name)
+	$Value = [Environment]::GetEnvironmentVariable($Name)
+	return ($Value -match '^(1|true|yes|on)$')
+}
+
+function Test-StrategyIsTargetScoped {
+	param([Parameter(Mandatory = $true)][string[]]$Lines)
+
+	foreach ($Line in $Lines) {
+		$Trim = $Line.Trim()
+		if ($Trim.Length -eq 0 -or $Trim.StartsWith('#')) {
+			continue
+		}
+		$IsWebProfile = (
+			($Trim -match '--filter-tcp=[^ ]*(80|443)') -or
+			($Trim -match '--filter-udp=[^ ]*443') -or
+			($Trim -match '--filter-l7=[^ ]*(http|tls|quic)')
+		)
+		if ($IsWebProfile -and ($Trim -notmatch '--hostlist=')) {
+			return $false
+		}
+	}
+	return $true
 }
 
 function Test-Admin {
@@ -284,10 +340,16 @@ function Install-WindowsRuntimeFromRelease {
 }
 
 function Get-DefaultStrategyLines {
+	param([string]$HostlistArg = '')
+
+	$HostlistPart = ''
+	if ($HostlistArg) {
+		$HostlistPart = ' ' + $HostlistArg
+	}
 	return @(
-		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5 --lua-desync=fakedsplit:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5 --new',
-		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000:repeats=6 --lua-desync=multidisorder:pos=midsld --new',
-		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new',
+		('--filter-tcp=80 --filter-l7=http' + $HostlistPart + ' --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5 --lua-desync=fakedsplit:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5 --new'),
+		('--filter-tcp=443 --filter-l7=tls' + $HostlistPart + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000:repeats=6 --lua-desync=multidisorder:pos=midsld --new'),
+		('--filter-udp=443 --filter-l7=quic' + $HostlistPart + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
 		'--filter-l7=wireguard,stun,discord --payload=wireguard_initiation,wireguard_cookie,stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
 	)
 }
@@ -305,7 +367,10 @@ function New-StrategyCandidate {
 
 function Get-StrategyCandidates {
 	Write-DiscordHostlist
+	Write-TargetHostlist
+	$TargetHostlist = Get-TargetHostlistArg
 	$DiscordHostlist = Get-DiscordHostlistArg
+	$AllowBroadStrategies = Test-EnvFlag 'ZAPRET2_ALLOW_BROAD_STRATEGIES'
 	$Candidates = New-Object System.Collections.Generic.List[object]
 	if ((Test-Path -LiteralPath $StrategyFile) -and (-not $ResetStrategy)) {
 		$Saved = @(Get-Content -LiteralPath $StrategyFile | Where-Object { $_.Trim().Length -gt 0 -and -not $_.Trim().StartsWith('#') })
@@ -314,56 +379,92 @@ function Get-StrategyCandidates {
 			if (Test-Path -LiteralPath $StrategyNameFile) {
 				$SavedName = 'saved-' + ((Get-Content -LiteralPath $StrategyNameFile -TotalCount 1) -replace '[^A-Za-z0-9_.-]', '_')
 			}
-			$Candidates.Add((New-StrategyCandidate $SavedName $Saved))
+			if ($AllowBroadStrategies -or (Test-StrategyIsTargetScoped $Saved)) {
+				$Candidates.Add((New-StrategyCandidate $SavedName $Saved))
+			} else {
+				Write-Warning "Skipping saved broad strategy $SavedName because it can affect unrelated HTTPS sites. Set ZAPRET2_ALLOW_BROAD_STRATEGIES=1 to allow it."
+			}
 		}
 	}
 
-	$Candidates.Add((New-StrategyCandidate 'tcp-light-multisplit' @(
-		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new',
-		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld'
+	$Candidates.Add((New-StrategyCandidate 'target-light-multisplit' @(
+		('--filter-tcp=80 --filter-l7=http ' + $TargetHostlist + ' --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new'),
+		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new'),
+		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
 	)))
-	$Candidates.Add((New-StrategyCandidate 'tcp-md5-fake-multisplit' @(
-		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --lua-desync=multisplit:pos=method+2 --new',
-		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2'
+	$Candidates.Add((New-StrategyCandidate 'target-md5-fake-multisplit' @(
+		('--filter-tcp=80 --filter-l7=http ' + $TargetHostlist + ' --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --lua-desync=multisplit:pos=method+2 --new'),
+		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2 --new'),
+		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
 	)))
-	$Candidates.Add((New-StrategyCandidate 'tcp-quic-md5-fake' @(
-		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --lua-desync=multisplit:pos=method+2 --new',
-		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2 --new',
-		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+	$Candidates.Add((New-StrategyCandidate 'target-quic-md5-fake' @(
+		('--filter-tcp=80 --filter-l7=http ' + $TargetHostlist + ' --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --lua-desync=multisplit:pos=method+2 --new'),
+		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2 --new'),
+		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
 	)))
-	$Candidates.Add((New-StrategyCandidate 'tls-timestamp-quic-fake' @(
-		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_ts=-1000 --new',
-		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+	$Candidates.Add((New-StrategyCandidate 'target-tls-timestamp-quic-fake' @(
+		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_ts=-1000 --new'),
+		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
 	)))
-	$Candidates.Add((New-StrategyCandidate 'tls-syndata-multisplit' @(
-		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=syndata:blob=fake_default_tls:tls_mod=rnd,dupsid,rndsni --lua-desync=multisplit:pos=midsld --new',
-		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+	$Candidates.Add((New-StrategyCandidate 'target-syndata-multisplit' @(
+		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=syndata:blob=fake_default_tls:tls_mod=rnd,dupsid,rndsni --lua-desync=multisplit:pos=midsld --new'),
+		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
 	)))
 	$Candidates.Add((New-StrategyCandidate 'discord-hostlist-google-fake' @(
-		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new',
+		('--filter-tcp=80 --filter-l7=http ' + $TargetHostlist + ' --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new'),
 		('--filter-tcp=443 --filter-l7=tls ' + $DiscordHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid,sni=www.google.com:repeats=11 --lua-desync=multidisorder:pos=1,midsld --new'),
-		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new',
+		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new'),
 		('--filter-udp=443 --filter-l7=quic ' + $DiscordHostlist + ' --payload=quic_initial --lua-desync=fake:blob=quic_google:repeats=11 --new'),
-		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new',
+		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
 		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
 	)))
 	$Candidates.Add((New-StrategyCandidate 'discord-hostlist-padencap' @(
-		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new',
+		('--filter-tcp=80 --filter-l7=http ' + $TargetHostlist + ' --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new'),
 		('--filter-tcp=443 --filter-l7=tls ' + $DiscordHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid,padencap:repeats=4 --lua-desync=multidisorder:pos=1,midsld --new'),
-		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new',
+		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new'),
 		('--filter-udp=443 --filter-l7=quic ' + $DiscordHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
-		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new',
+		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
 		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
 	)))
 	$Candidates.Add((New-StrategyCandidate 'discord-hostlist-syndata' @(
-		'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new',
+		('--filter-tcp=80 --filter-l7=http ' + $TargetHostlist + ' --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new'),
 		('--filter-tcp=443 --filter-l7=tls ' + $DiscordHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=syndata:blob=fake_default_tls:tls_mod=rnd,dupsid,rndsni --lua-desync=multisplit:pos=midsld --new'),
-		'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new',
+		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new'),
 		('--filter-udp=443 --filter-l7=quic ' + $DiscordHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
-		'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new',
+		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
 		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
 	)))
-	$Candidates.Add((New-StrategyCandidate 'full-default' (Get-DefaultStrategyLines)))
+	$Candidates.Add((New-StrategyCandidate 'target-full-default' (Get-DefaultStrategyLines $TargetHostlist)))
+
+	if ($AllowBroadStrategies) {
+		$Candidates.Add((New-StrategyCandidate 'broad-tcp-light-multisplit' @(
+			'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new',
+			'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld'
+		)))
+		$Candidates.Add((New-StrategyCandidate 'broad-tcp-md5-fake-multisplit' @(
+			'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --lua-desync=multisplit:pos=method+2 --new',
+			'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2'
+		)))
+		$Candidates.Add((New-StrategyCandidate 'broad-tcp-quic-md5-fake' @(
+			'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --lua-desync=multisplit:pos=method+2 --new',
+			'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2 --new',
+			'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+		)))
+		$Candidates.Add((New-StrategyCandidate 'broad-tls-timestamp-quic-fake' @(
+			'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_ts=-1000 --new',
+			'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+		)))
+		$Candidates.Add((New-StrategyCandidate 'broad-tls-syndata-multisplit' @(
+			'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=syndata:blob=fake_default_tls:tls_mod=rnd,dupsid,rndsni --lua-desync=multisplit:pos=midsld --new',
+			'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+		)))
+		$Candidates.Add((New-StrategyCandidate 'broad-full-default' (Get-DefaultStrategyLines)))
+	}
 
 	$Seen = @{}
 	$Unique = New-Object System.Collections.Generic.List[object]
@@ -386,9 +487,15 @@ function Save-StrategyCandidate {
 
 function Ensure-StrategyFile {
 	if (Test-Path -LiteralPath $StrategyFile) {
-		return
+		$Existing = @(Get-Content -LiteralPath $StrategyFile | Where-Object { $_.Trim().Length -gt 0 -and -not $_.Trim().StartsWith('#') })
+		if (($Existing.Count -gt 0) -and ((Test-EnvFlag 'ZAPRET2_ALLOW_BROAD_STRATEGIES') -or (Test-StrategyIsTargetScoped $Existing))) {
+			return
+		}
+		Write-Warning 'Replacing missing or broad saved strategy with target-scoped default to keep unrelated sites working.'
 	}
-	Save-StrategyCandidate (New-StrategyCandidate 'full-default' (Get-DefaultStrategyLines))
+	Write-DiscordHostlist
+	Write-TargetHostlist
+	Save-StrategyCandidate (New-StrategyCandidate 'target-full-default' (Get-DefaultStrategyLines (Get-TargetHostlistArg)))
 }
 
 function Add-ExistingArgFile {
@@ -411,6 +518,7 @@ function Write-RunConfig {
 	New-Item -ItemType Directory -Force -Path $ScriptDir | Out-Null
 	New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 	Write-DiscordHostlist
+	Write-TargetHostlist
 	Ensure-StrategyFile
 
 	$Lines = New-Object System.Collections.Generic.List[string]
@@ -521,6 +629,9 @@ function New-ProbeTarget {
 
 function Get-ConnectivityTargets {
 	return @(
+		(New-ProbeTarget 'GeneralWeb' @(
+			'https://example.com/'
+		)),
 		(New-ProbeTarget 'YouTube' @(
 			'https://www.youtube.com/generate_204',
 			'https://www.youtube.com/robots.txt'
@@ -697,7 +808,7 @@ function Invoke-StrategySearch {
 	}
 
 	Stop-Winws2
-	throw "No built-in Windows strategy passed YouTube/Telegram/Discord connectivity tests. Service was stopped to keep normal connectivity. See $ProbeReportFile"
+	throw "No built-in Windows strategy passed general web plus YouTube/Telegram/Discord connectivity tests. Service was stopped to keep normal connectivity. See $ProbeReportFile"
 }
 
 if ($Stop) {
@@ -743,7 +854,9 @@ if (-not $Exe -or -not $RuntimeOk) {
 
 if ($NoProbe) {
 	if ($ResetStrategy -or -not (Test-Path -LiteralPath $StrategyFile)) {
-		Save-StrategyCandidate (New-StrategyCandidate 'full-default' (Get-DefaultStrategyLines))
+		Write-DiscordHostlist
+		Write-TargetHostlist
+		Save-StrategyCandidate (New-StrategyCandidate 'target-full-default' (Get-DefaultStrategyLines (Get-TargetHostlistArg)))
 	}
 	$StrategyName = 'manual'
 	if (Test-Path -LiteralPath $StrategyNameFile) {

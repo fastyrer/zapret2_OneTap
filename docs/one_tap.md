@@ -45,7 +45,8 @@ one_tap_windows.bat
 
 - проверяет права администратора и наличие `winws2.exe`, `cygwin1.dll`, `WinDivert.dll`, `WinDivert*.sys`;
 - если Windows-бинарников нет, пытается скачать их из GitHub Releases в `binaries\windows-x86_64` или `binaries\windows-x86`;
-- создаёт набор стратегий и проверяет их на YouTube/Telegram/Discord;
+- создаёт набор стратегий и проверяет их на обычном HTTPS-сайте, YouTube, Telegram и Discord;
+- создаёт hostlist целей в `windows\state\one-tap-target-hosts.txt`, чтобы стратегии не трогали весь интернет;
 - создаёт отдельный hostlist для Discord в `windows\state\discord-hosts.txt` и пробует Discord-ориентированные TLS/QUIC/media стратегии;
 - пока проверка не проходит, перезапускает `winws2` со следующей стратегией;
 - сохраняет первую рабочую стратегию в `windows\strategy.windows.args`;
@@ -82,6 +83,7 @@ one_tap_windows.bat -NoProbe
 Внутри каждой группы проверяются все URL, чтобы, например, Discord API не давал ложный успех при неработающем gateway/CDN.
 HTTP-ответы вроде `403 Forbidden` или `404 Not Found` считаются успешной сетевой достижимостью: сервер ответил, значит DNS/TLS/маршрут прошли.
 Если Discord не проходит, в предупреждении будет указан конкретный провалившийся URL.
+Широкие стратегии, которые применяются ко всему HTTPS-трафику, по умолчанию пропускаются. Если они нужны для ручного эксперимента, задайте `ZAPRET2_ALLOW_BROAD_STRATEGIES=1`.
 
 В source checkout Windows-бинарников обычно нет. Обычный запуск пытается скачать их автоматически. По умолчанию проверяются релизы `fastyrer/zapret2_OneTap`, затем `bol-van/zapret2`. Если нужен другой источник, задайте переменную:
 
