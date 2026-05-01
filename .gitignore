@@ -7,6 +7,8 @@ nfq2/winws2.exe
 nfq2/WinDivert*
 tpws/tpws
 binaries/my/
+binaries/windows-x86/
+binaries/windows-x86_64/
 macos/state/
 windows/config.windows.ps1
 windows/strategy.windows.args

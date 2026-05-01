@@ -2,6 +2,7 @@
 param(
 	[switch]$SelfTest,
 	[switch]$NoService,
+	[switch]$NoDownload,
 	[switch]$Stop,
 	[switch]$ResetStrategy
 )
@@ -15,6 +16,7 @@ $StrategyFile = Join-Path $ScriptDir 'strategy.windows.args'
 $ArgsFile = Join-Path $ScriptDir 'winws2.args'
 $ConfigFile = Join-Path $ScriptDir 'config.windows.ps1'
 $LogFile = Join-Path $StateDir 'one_tap_windows.log'
+$DefaultReleaseRepos = @('fastyrer/zapret2_OneTap', 'bol-van/zapret2')
 
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 try {
@@ -86,10 +88,17 @@ function Find-Winws2 {
 	return $null
 }
 
+function Get-WindowsArchName {
+	if ([Environment]::Is64BitOperatingSystem) {
+		return 'windows-x86_64'
+	}
+	return 'windows-x86'
+}
+
 function Test-RuntimeFiles {
 	param([string]$Exe)
 	if (-not $Exe) {
-		Write-Warning 'winws2.exe is absent. Download a Windows release bundle or build Windows artifacts first.'
+		Write-Warning 'winws2.exe is absent.'
 		return $false
 	}
 
@@ -104,6 +113,148 @@ function Test-RuntimeFiles {
 		}
 	}
 	return $Ok
+}
+
+function Get-ReleaseRepos {
+	$Repos = New-Object System.Collections.Generic.List[string]
+	if ($env:ZAPRET2_RELEASE_REPO) {
+		foreach ($Repo in ($env:ZAPRET2_RELEASE_REPO -split '[,; ]+')) {
+			if ($Repo.Trim().Length -gt 0) {
+				$Repos.Add($Repo.Trim())
+			}
+		}
+	}
+	foreach ($Repo in $DefaultReleaseRepos) {
+		$Repos.Add($Repo)
+	}
+	return @($Repos | Select-Object -Unique)
+}
+
+function Invoke-GitHubRequest {
+	param([Parameter(Mandatory = $true)][string]$Uri)
+
+	[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+	$Headers = @{ 'User-Agent' = 'zapret2-one-tap' }
+	Invoke-RestMethod -Uri $Uri -Headers $Headers -UseBasicParsing
+}
+
+function Download-File {
+	param(
+		[Parameter(Mandatory = $true)][string]$Uri,
+		[Parameter(Mandatory = $true)][string]$OutFile
+	)
+
+	[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+	$Headers = @{ 'User-Agent' = 'zapret2-one-tap' }
+	$OldProgress = $ProgressPreference
+	$ProgressPreference = 'SilentlyContinue'
+	try {
+		Invoke-WebRequest -Uri $Uri -OutFile $OutFile -Headers $Headers -UseBasicParsing
+	} finally {
+		$ProgressPreference = $OldProgress
+	}
+}
+
+function Expand-Zip {
+	param(
+		[Parameter(Mandatory = $true)][string]$ZipFile,
+		[Parameter(Mandatory = $true)][string]$Destination
+	)
+
+	if (Test-Path -LiteralPath $Destination) {
+		Remove-Item -LiteralPath $Destination -Recurse -Force
+	}
+	New-Item -ItemType Directory -Force -Path $Destination | Out-Null
+
+	try {
+		Expand-Archive -LiteralPath $ZipFile -DestinationPath $Destination -Force
+	} catch {
+		if (Test-Path -LiteralPath $Destination) {
+			Remove-Item -LiteralPath $Destination -Recurse -Force
+		}
+		Add-Type -AssemblyName System.IO.Compression.FileSystem
+		[System.IO.Compression.ZipFile]::ExtractToDirectory($ZipFile, $Destination)
+	}
+}
+
+function Find-RuntimeInExtractedRelease {
+	param(
+		[Parameter(Mandatory = $true)][string]$ExtractDir,
+		[Parameter(Mandatory = $true)][string]$ArchName
+	)
+
+	$NeedSys = if ([Environment]::Is64BitOperatingSystem) { 'WinDivert64.sys' } else { 'WinDivert32.sys' }
+	$Candidates = @(Get-ChildItem -LiteralPath $ExtractDir -Recurse -Filter winws2.exe | Where-Object { -not $_.PSIsContainer })
+	foreach ($Candidate in $Candidates) {
+		$Normalized = $Candidate.FullName -replace '/', '\'
+		if ($Normalized -match ('\\binaries\\' + [regex]::Escape($ArchName) + '\\winws2\.exe$')) {
+			return $Candidate.FullName
+		}
+	}
+	foreach ($Candidate in $Candidates) {
+		$Dir = Split-Path -Parent $Candidate.FullName
+		if (
+			(Test-Path -LiteralPath (Join-Path $Dir 'cygwin1.dll')) -and
+			(Test-Path -LiteralPath (Join-Path $Dir 'WinDivert.dll')) -and
+			(Test-Path -LiteralPath (Join-Path $Dir $NeedSys))
+		) {
+			return $Candidate.FullName
+		}
+	}
+	return $null
+}
+
+function Install-WindowsRuntimeFromRelease {
+	$ArchName = Get-WindowsArchName
+	$ArchToken = if ($ArchName -eq 'windows-x86_64') { 'x86_64' } else { 'x86' }
+	$Repos = Get-ReleaseRepos
+	$LastError = $null
+
+	foreach ($Repo in $Repos) {
+		try {
+			Info "Trying to download Windows runtime from GitHub release: $Repo"
+			$Release = Invoke-GitHubRequest "https://api.github.com/repos/$Repo/releases/latest"
+			$Assets = @($Release.assets)
+			$Asset = @($Assets | Where-Object {
+				$_.name -match '\.zip$' -and $_.name -match "win.*$ArchToken"
+			} | Select-Object -First 1)
+			if (-not $Asset -or $Asset.Count -eq 0) {
+				$Asset = @($Assets | Where-Object {
+					$_.name -match '\.zip$' -and $_.name -notmatch 'openwrt|embedded'
+				} | Select-Object -First 1)
+			}
+			if (-not $Asset -or $Asset.Count -eq 0) {
+				throw "No suitable zip asset found in latest release of $Repo"
+			}
+
+			$ZipPath = Join-Path $StateDir $Asset[0].name
+			$ExtractDir = Join-Path $StateDir 'release_extract'
+			Info "Downloading $($Asset[0].name)"
+			Download-File $Asset[0].browser_download_url $ZipPath
+			Info "Extracting $($Asset[0].name)"
+			Expand-Zip $ZipPath $ExtractDir
+
+			$ExtractedExe = Find-RuntimeInExtractedRelease $ExtractDir $ArchName
+			if (-not $ExtractedExe) {
+				throw "Downloaded release does not contain $ArchName runtime files"
+			}
+
+			$SourceDir = Split-Path -Parent $ExtractedExe
+			$DestDir = Join-Path $Root (Join-Path 'binaries' $ArchName)
+			New-Item -ItemType Directory -Force -Path $DestDir | Out-Null
+			Get-ChildItem -LiteralPath $SourceDir | Where-Object { -not $_.PSIsContainer } | ForEach-Object {
+				Copy-Item -LiteralPath $_.FullName -Destination $DestDir -Force
+			}
+
+			Info "Windows runtime installed to $DestDir"
+			return (Join-Path $DestDir 'winws2.exe')
+		} catch {
+			$LastError = $_.Exception.Message
+			Write-Warning "Could not use release repo $Repo: $LastError"
+		}
+	}
+
+	throw "Automatic Windows runtime download failed. Last error: $LastError"
 }
 
 function Write-DefaultStrategy {
@@ -233,7 +384,7 @@ if ($SelfTest) {
 	if ($RuntimeOk) {
 		Info "Windows runtime bundle is present: $Exe"
 	} else {
-		Info 'Windows runtime bundle is not present in this checkout. This is expected for source-only trees.'
+		Info 'Windows runtime bundle is not present in this checkout. Normal launch will try to download it automatically.'
 	}
 	exit 0
 }
@@ -243,7 +394,13 @@ if (-not (Test-Admin)) {
 	exit 1
 }
 if (-not $Exe -or -not $RuntimeOk) {
-	throw 'Windows binaries are not ready. Use a release bundle with winws2.exe, cygwin1.dll, WinDivert.dll and WinDivert*.sys, or build Windows artifacts from docs\compile.'
+	if (-not $NoDownload) {
+		$Exe = Install-WindowsRuntimeFromRelease
+		$RuntimeOk = Test-RuntimeFiles $Exe
+	}
+}
+if (-not $Exe -or -not $RuntimeOk) {
+	throw 'Windows binaries are not ready. Automatic download failed or was disabled. Put winws2.exe, cygwin1.dll, WinDivert.dll and WinDivert*.sys into binaries\windows-x86_64 or binaries\windows-x86, or build Windows artifacts from docs\compile.'
 }
 
 Write-RunConfig $Exe

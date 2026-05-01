@@ -44,6 +44,7 @@ one_tap_windows.bat
 Что делает Windows-сценарий:
 
 - проверяет права администратора и наличие `winws2.exe`, `cygwin1.dll`, `WinDivert.dll`, `WinDivert*.sys`;
+- если Windows-бинарников нет, пытается скачать их из GitHub Releases в `binaries\windows-x86_64` или `binaries\windows-x86`;
 - создаёт `windows\strategy.windows.args`, если стратегии ещё нет;
 - создаёт итоговый `windows\winws2.args`;
 - сохраняет пути в `windows\config.windows.ps1`;
@@ -69,7 +70,20 @@ one_tap_windows.bat -SelfTest
 
 Если окно закрылось слишком быстро, откройте `cmd.exe` в папке проекта и запустите ту же команду вручную. Логи пишутся в `windows\state\one_tap_windows_launcher.log` и `windows\state\one_tap_windows.log`.
 
-В source checkout Windows-бинарников обычно нет. Их нужно брать из release bundle или собирать по `docs\compile`.
+В source checkout Windows-бинарников обычно нет. Обычный запуск пытается скачать их автоматически. По умолчанию проверяются релизы `fastyrer/zapret2_OneTap`, затем `bol-van/zapret2`. Если нужен другой источник, задайте переменную:
+
+```cmd
+set ZAPRET2_RELEASE_REPO=owner/repo
+one_tap_windows.bat
+```
+
+Автозагрузку можно отключить:
+
+```cmd
+one_tap_windows.bat -NoDownload
+```
+
+Если интернета нет, положите `winws2.exe`, `cygwin1.dll`, `WinDivert.dll`, `WinDivert64.sys` в `binaries\windows-x86_64` вручную или соберите Windows artifacts по `docs\compile`.
 
 ## macOS
 
