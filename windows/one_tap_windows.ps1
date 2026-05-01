@@ -478,6 +478,12 @@ function Get-ConnectivityTargets {
 		(New-ProbeTarget 'Telegram' @(
 			'https://api.telegram.org',
 			'https://web.telegram.org'
+		)),
+		(New-ProbeTarget 'Discord' @(
+			'https://discord.com/api/v9/experiments',
+			'https://discord.com',
+			'https://gateway.discord.gg',
+			'https://cdn.discordapp.com'
 		))
 	)
 }
@@ -599,7 +605,7 @@ function Invoke-StrategySearch {
 	}
 
 	Stop-Winws2
-	throw "No built-in Windows strategy passed YouTube/Telegram connectivity tests. Service was stopped to keep normal connectivity. See $ProbeReportFile"
+	throw "No built-in Windows strategy passed YouTube/Telegram/Discord connectivity tests. Service was stopped to keep normal connectivity. See $ProbeReportFile"
 }
 
 if ($Stop) {

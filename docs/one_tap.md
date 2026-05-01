@@ -45,7 +45,7 @@ one_tap_windows.bat
 
 - проверяет права администратора и наличие `winws2.exe`, `cygwin1.dll`, `WinDivert.dll`, `WinDivert*.sys`;
 - если Windows-бинарников нет, пытается скачать их из GitHub Releases в `binaries\windows-x86_64` или `binaries\windows-x86`;
-- создаёт набор стратегий и проверяет их на YouTube/Telegram;
+- создаёт набор стратегий и проверяет их на YouTube/Telegram/Discord;
 - пока проверка не проходит, перезапускает `winws2` со следующей стратегией;
 - сохраняет первую рабочую стратегию в `windows\strategy.windows.args`;
 - создаёт итоговый `windows\winws2.args`;
@@ -70,7 +70,7 @@ windows\stop_windows.cmd
 one_tap_windows.bat -SelfTest
 ```
 
-Запуск без автоматической проверки YouTube/Telegram:
+Запуск без автоматической проверки YouTube/Telegram/Discord:
 
 ```cmd
 one_tap_windows.bat -NoProbe
