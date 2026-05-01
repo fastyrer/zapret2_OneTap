@@ -136,7 +136,8 @@ if [ ! -d "$BINDIR" ] || ! dir_is_not_empty "$BINDIR" ]; then
 			echo "to compile on other systems : make"
 			;;
 		Darwin)
-			echo "macos is not supported"
+			echo "macos packet interception is not supported"
+			echo "utility diagnostics: macos/one_tap_macos.sh --self-test"
 			;;
 		FreeBSD)
 			echo "you need to download release from github or build binaries from source"

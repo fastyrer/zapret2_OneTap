@@ -7,6 +7,11 @@ nfq2/winws2.exe
 nfq2/WinDivert*
 tpws/tpws
 binaries/my/
+macos/state/
+windows/config.windows.ps1
+windows/strategy.windows.args
+windows/winws2.args
+windows/state/
 ipset/zapret-ip*.txt
 ipset/zapret-ip*.gz
 ipset/zapret-hosts*.txt

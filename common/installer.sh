@@ -718,7 +718,7 @@ check_prerequisites_openwrt()
 		echo your system uses default busybox gzip. its several times slower than GNU gzip.
 		echo ip/host list scripts will run much faster with GNU gzip
 		echo installer can install GNU gzip but it requires about 100 Kb space
-		if ask_yes_no N "do you want to install GNU gzip"; then
+		if [ "$BATCH" != 1 ] && ask_yes_no N "do you want to install GNU gzip"; then
 			[ "$UPD" = "0" ] && {
 				$OPENWRT_PACKAGER_UPDATE
 				UPD=1
@@ -731,7 +731,7 @@ check_prerequisites_openwrt()
 		echo your system uses default busybox sort. its much slower and consumes much more RAM than GNU sort
 		echo ip/host list scripts will run much faster with GNU sort
 		echo installer can install GNU sort but it requires about 100 Kb space
-		if ask_yes_no N "do you want to install GNU sort"; then
+		if [ "$BATCH" != 1 ] && ask_yes_no N "do you want to install GNU sort"; then
 			[ "$UPD" = "0" ] && {
 				$OPENWRT_PACKAGER_UPDATE
 				UPD=1
@@ -743,7 +743,7 @@ check_prerequisites_openwrt()
 		echo
 		echo no methods of sub-second sleep were found.
 		echo if you want to speed up blockcheck install coreutils-sleep. it requires about 40 Kb space
-		if ask_yes_no N "do you want to install COREUTILS sleep"; then
+		if [ "$BATCH" != 1 ] && ask_yes_no N "do you want to install COREUTILS sleep"; then
 			[ "$UPD" = "0" ] && {
 				$OPENWRT_PACKAGER_UPDATE
 				UPD=1
