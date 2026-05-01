@@ -250,7 +250,7 @@ function Install-WindowsRuntimeFromRelease {
 			return (Join-Path $DestDir 'winws2.exe')
 		} catch {
 			$LastError = $_.Exception.Message
-			Write-Warning "Could not use release repo $Repo: $LastError"
+			Write-Warning "Could not use release repo ${Repo}: $LastError"
 		}
 	}
 
