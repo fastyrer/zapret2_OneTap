@@ -7,6 +7,8 @@ set "PS=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 if not exist "%PS%" set "PS=powershell.exe"
 set "STATE=%~dp0windows\state"
 set "LOG=%STATE%\one_tap_windows_launcher.log"
+set "ELEVATE_SCRIPT=%~f0"
+set "ELEVATE_ARGS=%*"
 
 if not exist "%STATE%" mkdir "%STATE%" >nul 2>nul
 echo [%date% %time%] one_tap_windows.bat %*>"%LOG%"
@@ -30,7 +32,11 @@ net session >nul 2>nul
 if not "%errorlevel%"=="0" (
 	echo Requesting administrator rights...
 	echo Requesting administrator rights...>>"%LOG%"
-	"%PS%" -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath '%~f0' -ArgumentList '%*' -Verb RunAs -Wait"
+	if "%~1"=="" (
+		"%PS%" -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath $env:ELEVATE_SCRIPT -Verb RunAs -Wait"
+	) else (
+		"%PS%" -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath $env:ELEVATE_SCRIPT -ArgumentList $env:ELEVATE_ARGS -Verb RunAs -Wait"
+	)
 	set "RC=!errorlevel!"
 	if not "!RC!"=="0" (
 		echo Administrator elevation failed or was cancelled. Exit code !RC!.
