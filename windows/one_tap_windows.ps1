@@ -23,7 +23,7 @@ $DiscordHostlistFile = Join-Path $StateDir 'discord-hosts.txt'
 $TargetHostlistFile = Join-Path $StateDir 'one-tap-target-hosts.txt'
 $TelegramIpsetFile = Join-Path $StateDir 'telegram-ipset.txt'
 $DefaultReleaseRepos = @('fastyrer/zapret2_OneTap', 'bol-van/zapret2')
-$OneTapWindowsVersion = '2026-05-02.4'
+$OneTapWindowsVersion = '2026-05-02.5'
 
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 try {
@@ -1023,10 +1023,13 @@ function Test-ProbeContent {
 	param(
 		[Parameter(Mandatory = $true)]$Spec,
 		[Parameter(Mandatory = $true)][int]$StatusCode,
-		[Parameter(Mandatory = $true)][byte[]]$Bytes,
+		[AllowEmptyCollection()][AllowNull()][byte[]]$Bytes = $null,
 		[string]$Source = ''
 	)
 
+	if ($null -eq $Bytes) {
+		$Bytes = [byte[]]@()
+	}
 	$BytesRead = $Bytes.Length
 
 	$Failures = @()
@@ -1118,14 +1121,28 @@ function Test-UrlReachableWithCurl {
 			'--write-out', '%{http_code}',
 			$Url
 		)
-		$StatusOutput = & $Curl.Source @CurlArgs 2>$ErrorFile
-		$ExitCode = $LASTEXITCODE
+		$CurlExceptionText = ''
+		$PreviousErrorActionPreference = $ErrorActionPreference
+		try {
+			$ErrorActionPreference = 'Continue'
+			$StatusOutput = & $Curl.Source @CurlArgs 2>$ErrorFile
+			$ExitCode = $LASTEXITCODE
+		} catch {
+			$StatusOutput = ''
+			$ExitCode = 1
+			$CurlExceptionText = $_.Exception.Message
+		} finally {
+			$ErrorActionPreference = $PreviousErrorActionPreference
+		}
 		$ErrorText = ''
 		if (Test-Path -LiteralPath $ErrorFile) {
 			$RawErrorText = Get-Content -LiteralPath $ErrorFile -Raw -ErrorAction SilentlyContinue
 			if ($RawErrorText) {
 				$ErrorText = $RawErrorText.Trim()
 			}
+		}
+		if ((-not $ErrorText) -and $CurlExceptionText) {
+			$ErrorText = $CurlExceptionText
 		}
 		$StatusText = ($StatusOutput | Out-String).Trim()
 		$StatusCode = 0
