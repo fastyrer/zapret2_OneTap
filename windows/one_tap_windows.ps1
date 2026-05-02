@@ -21,7 +21,9 @@ $StrategyNameFile = Join-Path $StateDir 'strategy.windows.name'
 $ProbeReportFile = Join-Path $StateDir 'connectivity-test.json'
 $DiscordHostlistFile = Join-Path $StateDir 'discord-hosts.txt'
 $TargetHostlistFile = Join-Path $StateDir 'one-tap-target-hosts.txt'
+$TelegramIpsetFile = Join-Path $StateDir 'telegram-ipset.txt'
 $DefaultReleaseRepos = @('fastyrer/zapret2_OneTap', 'bol-van/zapret2')
+$OneTapWindowsVersion = '2026-05-02.2'
 
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 try {
@@ -34,6 +36,8 @@ function Info {
 	param([string]$Message)
 	Write-Host "[one-tap] $Message"
 }
+
+Info "Windows script version: $OneTapWindowsVersion"
 
 function To-ZapretPath {
 	param([Parameter(Mandatory = $true)][string]$Path)
@@ -62,6 +66,30 @@ function Write-DiscordHostlist {
 
 function Get-DiscordHostlistArg {
 	return '--hostlist="' + (To-ZapretPath $DiscordHostlistFile) + '"'
+}
+
+function Get-TelegramIpsets {
+	return @(
+		'91.108.4.0/22',
+		'91.108.8.0/22',
+		'91.108.12.0/22',
+		'91.108.16.0/22',
+		'91.108.56.0/22',
+		'149.154.160.0/22',
+		'149.154.164.0/22',
+		'149.154.168.0/22',
+		'149.154.172.0/22'
+	)
+}
+
+function Write-TelegramIpset {
+	$Ips = Get-TelegramIpsets
+	New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
+	Set-Content -LiteralPath $TelegramIpsetFile -Value $Ips -Encoding ASCII
+}
+
+function Get-TelegramIpsetArg {
+	return '--ipset="' + (To-ZapretPath $TelegramIpsetFile) + '"'
 }
 
 function Write-TargetHostlist {
@@ -105,6 +133,35 @@ function Test-EnvFlag {
 	return ($Value -match '^(1|true|yes|on)$')
 }
 
+function Get-QuicDesyncArg {
+	param(
+		[string]$Blob = 'fake_default_quic',
+		[int]$Repeats = 11
+	)
+	if (Test-EnvFlag 'ZAPRET2_KEEP_QUIC') {
+		return "--lua-desync=fake:blob=${Blob}:repeats=$Repeats"
+	}
+	return '--lua-desync=drop'
+}
+
+function New-QuicStrategyLine {
+	param(
+		[string]$FilterArg = '',
+		[string]$Blob = 'fake_default_quic'
+	)
+	$FilterPart = ''
+	if ($FilterArg) {
+		$FilterPart = ' ' + $FilterArg
+	}
+	return '--filter-udp=443 --filter-l7=quic' + $FilterPart + ' --payload=quic_initial ' + (Get-QuicDesyncArg -Blob $Blob) + ' --new'
+}
+
+function New-TelegramMtprotoStrategyLine {
+	param([Parameter(Mandatory = $true)][string]$IpsetArg)
+
+	return '--filter-tcp=443,5222 --filter-l7=mtproto ' + $IpsetArg + ' --out-range=-d10 --payload=mtproto_initial --lua-desync=fake:blob=0x00000000:tcp_md5:repeats=2 --lua-desync=multisplit:pos=2 --new'
+}
+
 function Test-StrategyIsTargetScoped {
 	param([Parameter(Mandatory = $true)][string[]]$Lines)
 
@@ -118,11 +175,53 @@ function Test-StrategyIsTargetScoped {
 			($Trim -match '--filter-udp=[^ ]*443') -or
 			($Trim -match '--filter-l7=[^ ]*(http|tls|quic)')
 		)
-		if ($IsWebProfile -and ($Trim -notmatch '--hostlist=')) {
+		if ($IsWebProfile -and ($Trim -notmatch '--hostlist=') -and ($Trim -notmatch '--ipset=')) {
 			return $false
 		}
 	}
 	return $true
+}
+
+function Test-StrategyNeedsQuicFallbackRefresh {
+	param([Parameter(Mandatory = $true)][string[]]$Lines)
+
+	if (Test-EnvFlag 'ZAPRET2_KEEP_QUIC') {
+		return $false
+	}
+	foreach ($Line in $Lines) {
+		$Trim = $Line.Trim()
+		if (($Trim -match '--filter-l7=[^ ]*quic') -and ($Trim -match '--lua-desync=fake:') -and ($Trim -notmatch '--lua-desync=drop')) {
+			return $true
+		}
+	}
+	return $false
+}
+
+function Get-StrategyStorageName {
+	param([string]$Name)
+
+	$Clean = ''
+	if ($Name) {
+		$Clean = $Name.Trim() -replace '[^A-Za-z0-9_.-]', '_'
+	}
+	while ($Clean -match '^saved-(.+)$') {
+		$Clean = $Matches[1]
+	}
+	if ($Clean.Length -eq 0) {
+		return 'custom'
+	}
+	return $Clean
+}
+
+function Get-SavedCandidateName {
+	$Name = 'saved'
+	if (Test-Path -LiteralPath $StrategyNameFile) {
+		$StoredName = Get-StrategyStorageName (Get-Content -LiteralPath $StrategyNameFile -TotalCount 1)
+		if (($StoredName.Length -gt 0) -and ($StoredName -ne 'custom') -and ($StoredName -ne 'saved')) {
+			$Name = 'saved-' + $StoredName
+		}
+	}
+	return $Name
 }
 
 function Test-Admin {
@@ -350,18 +449,25 @@ function Install-WindowsRuntimeFromRelease {
 }
 
 function Get-DefaultStrategyLines {
-	param([string]$HostlistArg = '')
+	param(
+		[string]$HostlistArg = '',
+		[string]$TelegramIpsetArg = ''
+	)
 
 	$HostlistPart = ''
 	if ($HostlistArg) {
 		$HostlistPart = ' ' + $HostlistArg
 	}
-	return @(
+	$Lines = @(
 		('--filter-tcp=80 --filter-l7=http' + $HostlistPart + ' --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5 --lua-desync=fakedsplit:ip_autottl=-2,3-20:ip6_autottl=-2,3-20:tcp_md5 --new'),
 		('--filter-tcp=443 --filter-l7=tls' + $HostlistPart + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tcp_seq=-10000:repeats=6 --lua-desync=multidisorder:pos=midsld --new'),
-		('--filter-udp=443 --filter-l7=quic' + $HostlistPart + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
+		(New-QuicStrategyLine -FilterArg $HostlistArg),
 		'--filter-l7=wireguard,stun,discord --payload=wireguard_initiation,wireguard_cookie,stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
 	)
+	if ($TelegramIpsetArg) {
+		$Lines += (New-TelegramMtprotoStrategyLine -IpsetArg $TelegramIpsetArg)
+	}
+	return $Lines
 }
 
 function New-StrategyCandidate {
@@ -378,18 +484,20 @@ function New-StrategyCandidate {
 function Get-StrategyCandidates {
 	Write-DiscordHostlist
 	Write-TargetHostlist
+	Write-TelegramIpset
 	$TargetHostlist = Get-TargetHostlistArg
 	$DiscordHostlist = Get-DiscordHostlistArg
+	$TelegramIpset = Get-TelegramIpsetArg
+	$TelegramMtproto = New-TelegramMtprotoStrategyLine -IpsetArg $TelegramIpset
 	$AllowBroadStrategies = Test-EnvFlag 'ZAPRET2_ALLOW_BROAD_STRATEGIES'
 	$Candidates = New-Object System.Collections.Generic.List[object]
 	if ((Test-Path -LiteralPath $StrategyFile) -and (-not $ResetStrategy)) {
 		$Saved = @(Get-Content -LiteralPath $StrategyFile | Where-Object { $_.Trim().Length -gt 0 -and -not $_.Trim().StartsWith('#') })
 		if ($Saved.Count -gt 0) {
-			$SavedName = 'saved'
-			if (Test-Path -LiteralPath $StrategyNameFile) {
-				$SavedName = 'saved-' + ((Get-Content -LiteralPath $StrategyNameFile -TotalCount 1) -replace '[^A-Za-z0-9_.-]', '_')
-			}
-			if ($AllowBroadStrategies -or (Test-StrategyIsTargetScoped $Saved)) {
+			$SavedName = Get-SavedCandidateName
+			if (Test-StrategyNeedsQuicFallbackRefresh $Saved) {
+				Write-Warning "Skipping saved strategy $SavedName because it keeps QUIC enabled; rebuilding a TCP-fallback strategy. Set ZAPRET2_KEEP_QUIC=1 to keep QUIC."
+			} elseif ($AllowBroadStrategies -or (Test-StrategyIsTargetScoped $Saved)) {
 				$Candidates.Add((New-StrategyCandidate $SavedName $Saved))
 			} else {
 				Write-Warning "Skipping saved broad strategy $SavedName because it can affect unrelated HTTPS sites. Set ZAPRET2_ALLOW_BROAD_STRATEGIES=1 to allow it."
@@ -400,56 +508,64 @@ function Get-StrategyCandidates {
 	$Candidates.Add((New-StrategyCandidate 'target-light-multisplit' @(
 		('--filter-tcp=80 --filter-l7=http ' + $TargetHostlist + ' --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new'),
 		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new'),
-		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
-		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
+		(New-QuicStrategyLine -FilterArg $TargetHostlist),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2',
+		$TelegramMtproto
 	)))
 	$Candidates.Add((New-StrategyCandidate 'target-md5-fake-multisplit' @(
 		('--filter-tcp=80 --filter-l7=http ' + $TargetHostlist + ' --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --lua-desync=multisplit:pos=method+2 --new'),
 		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2 --new'),
-		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
-		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
+		(New-QuicStrategyLine -FilterArg $TargetHostlist),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2',
+		$TelegramMtproto
 	)))
 	$Candidates.Add((New-StrategyCandidate 'target-quic-md5-fake' @(
 		('--filter-tcp=80 --filter-l7=http ' + $TargetHostlist + ' --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --lua-desync=multisplit:pos=method+2 --new'),
 		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2 --new'),
-		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
-		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
+		(New-QuicStrategyLine -FilterArg $TargetHostlist),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2',
+		$TelegramMtproto
 	)))
 	$Candidates.Add((New-StrategyCandidate 'target-tls-timestamp-quic-fake' @(
 		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_ts=-1000 --new'),
-		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
-		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
+		(New-QuicStrategyLine -FilterArg $TargetHostlist),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2',
+		$TelegramMtproto
 	)))
 	$Candidates.Add((New-StrategyCandidate 'target-syndata-multisplit' @(
 		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=syndata:blob=fake_default_tls:tls_mod=rnd,dupsid,rndsni --lua-desync=multisplit:pos=midsld --new'),
-		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
-		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
+		(New-QuicStrategyLine -FilterArg $TargetHostlist),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2',
+		$TelegramMtproto
 	)))
 	$Candidates.Add((New-StrategyCandidate 'discord-hostlist-google-fake' @(
 		('--filter-tcp=80 --filter-l7=http ' + $TargetHostlist + ' --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new'),
 		('--filter-tcp=443 --filter-l7=tls ' + $DiscordHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid,sni=www.google.com:repeats=11 --lua-desync=multidisorder:pos=1,midsld --new'),
 		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new'),
-		('--filter-udp=443 --filter-l7=quic ' + $DiscordHostlist + ' --payload=quic_initial --lua-desync=fake:blob=quic_google:repeats=11 --new'),
-		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
-		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
+		(New-QuicStrategyLine -FilterArg $DiscordHostlist -Blob 'quic_google'),
+		(New-QuicStrategyLine -FilterArg $TargetHostlist),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2',
+		$TelegramMtproto
 	)))
 	$Candidates.Add((New-StrategyCandidate 'discord-hostlist-padencap' @(
 		('--filter-tcp=80 --filter-l7=http ' + $TargetHostlist + ' --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new'),
 		('--filter-tcp=443 --filter-l7=tls ' + $DiscordHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid,padencap:repeats=4 --lua-desync=multidisorder:pos=1,midsld --new'),
 		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new'),
-		('--filter-udp=443 --filter-l7=quic ' + $DiscordHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
-		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
-		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
+		(New-QuicStrategyLine -FilterArg $DiscordHostlist),
+		(New-QuicStrategyLine -FilterArg $TargetHostlist),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2',
+		$TelegramMtproto
 	)))
 	$Candidates.Add((New-StrategyCandidate 'discord-hostlist-syndata' @(
 		('--filter-tcp=80 --filter-l7=http ' + $TargetHostlist + ' --out-range=-d10 --payload=http_req --lua-desync=multisplit:pos=method+2 --new'),
 		('--filter-tcp=443 --filter-l7=tls ' + $DiscordHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=syndata:blob=fake_default_tls:tls_mod=rnd,dupsid,rndsni --lua-desync=multisplit:pos=midsld --new'),
 		('--filter-tcp=443 --filter-l7=tls ' + $TargetHostlist + ' --out-range=-d10 --payload=tls_client_hello --lua-desync=multisplit:pos=midsld --new'),
-		('--filter-udp=443 --filter-l7=quic ' + $DiscordHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
-		('--filter-udp=443 --filter-l7=quic ' + $TargetHostlist + ' --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11 --new'),
-		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2'
+		(New-QuicStrategyLine -FilterArg $DiscordHostlist),
+		(New-QuicStrategyLine -FilterArg $TargetHostlist),
+		'--filter-l7=stun,discord --payload=stun,discord_ip_discovery --lua-desync=fake:blob=0x00000000000000000000000000000000:repeats=2',
+		$TelegramMtproto
 	)))
-	$Candidates.Add((New-StrategyCandidate 'target-full-default' (Get-DefaultStrategyLines $TargetHostlist)))
+	$Candidates.Add((New-StrategyCandidate 'target-full-default' (Get-DefaultStrategyLines $TargetHostlist $TelegramIpset)))
 
 	if ($AllowBroadStrategies) {
 		$Candidates.Add((New-StrategyCandidate 'broad-tcp-light-multisplit' @(
@@ -463,15 +579,15 @@ function Get-StrategyCandidates {
 		$Candidates.Add((New-StrategyCandidate 'broad-tcp-quic-md5-fake' @(
 			'--filter-tcp=80 --filter-l7=http --out-range=-d10 --payload=http_req --lua-desync=fake:blob=fake_default_http:tcp_md5:repeats=1 --lua-desync=multisplit:pos=method+2 --new',
 			'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_md5:tls_mod=rnd,dupsid:repeats=1 --lua-desync=multisplit:pos=2 --new',
-			'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+			(New-QuicStrategyLine)
 		)))
 		$Candidates.Add((New-StrategyCandidate 'broad-tls-timestamp-quic-fake' @(
 			'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=fake:blob=fake_default_tls:tcp_ts=-1000 --new',
-			'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+			(New-QuicStrategyLine)
 		)))
 		$Candidates.Add((New-StrategyCandidate 'broad-tls-syndata-multisplit' @(
 			'--filter-tcp=443 --filter-l7=tls --out-range=-d10 --payload=tls_client_hello --lua-desync=syndata:blob=fake_default_tls:tls_mod=rnd,dupsid,rndsni --lua-desync=multisplit:pos=midsld --new',
-			'--filter-udp=443 --filter-l7=quic --payload=quic_initial --lua-desync=fake:blob=fake_default_quic:repeats=11'
+			(New-QuicStrategyLine)
 		)))
 		$Candidates.Add((New-StrategyCandidate 'broad-full-default' (Get-DefaultStrategyLines)))
 	}
@@ -492,7 +608,41 @@ function Save-StrategyCandidate {
 	param([Parameter(Mandatory = $true)]$Candidate)
 
 	Set-Content -LiteralPath $StrategyFile -Value $Candidate.Lines -Encoding ASCII
-	Set-Content -LiteralPath $StrategyNameFile -Value $Candidate.Name -Encoding ASCII
+	Set-Content -LiteralPath $StrategyNameFile -Value (Get-StrategyStorageName $Candidate.Name) -Encoding ASCII
+}
+
+function Get-StrategySnapshot {
+	$HasStrategy = Test-Path -LiteralPath $StrategyFile
+	$HasName = Test-Path -LiteralPath $StrategyNameFile
+	$Lines = @()
+	$Name = ''
+	if ($HasStrategy) {
+		$Lines = @(Get-Content -LiteralPath $StrategyFile)
+	}
+	if ($HasName) {
+		$Name = Get-Content -LiteralPath $StrategyNameFile -TotalCount 1
+	}
+	return [pscustomobject]@{
+		HasStrategy = $HasStrategy
+		Lines = @($Lines)
+		HasName = $HasName
+		Name = $Name
+	}
+}
+
+function Restore-StrategySnapshot {
+	param([Parameter(Mandatory = $true)]$Snapshot)
+
+	if ($Snapshot.HasStrategy) {
+		Set-Content -LiteralPath $StrategyFile -Value $Snapshot.Lines -Encoding ASCII
+	} elseif (Test-Path -LiteralPath $StrategyFile) {
+		Remove-Item -LiteralPath $StrategyFile -Force
+	}
+	if ($Snapshot.HasName) {
+		Set-Content -LiteralPath $StrategyNameFile -Value $Snapshot.Name -Encoding ASCII
+	} elseif (Test-Path -LiteralPath $StrategyNameFile) {
+		Remove-Item -LiteralPath $StrategyNameFile -Force
+	}
 }
 
 function Ensure-StrategyFile {
@@ -505,7 +655,8 @@ function Ensure-StrategyFile {
 	}
 	Write-DiscordHostlist
 	Write-TargetHostlist
-	Save-StrategyCandidate (New-StrategyCandidate 'target-full-default' (Get-DefaultStrategyLines (Get-TargetHostlistArg)))
+	Write-TelegramIpset
+	Save-StrategyCandidate (New-StrategyCandidate 'target-full-default' (Get-DefaultStrategyLines (Get-TargetHostlistArg) (Get-TelegramIpsetArg)))
 }
 
 function Add-ExistingArgFile {
@@ -529,10 +680,11 @@ function Write-RunConfig {
 	New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 	Write-DiscordHostlist
 	Write-TargetHostlist
+	Write-TelegramIpset
 	Ensure-StrategyFile
 
 	$Lines = New-Object System.Collections.Generic.List[string]
-	$Lines.Add('--wf-tcp-out=80,443')
+	$Lines.Add('--wf-tcp-out=80,443,5222')
 	$Lines.Add('--wf-udp-out=443')
 	$Lines.Add('--wf-filter-lan=1')
 	$Lines.Add('--wf-filter-loopback=0')
@@ -602,6 +754,57 @@ function Stop-Winws2 {
 	}
 }
 
+function Invoke-ScCommand {
+	param([Parameter(Mandatory = $true)][string[]]$Arguments)
+
+	$Output = & sc.exe @Arguments 2>&1
+	$Output | Out-Host
+	if ($LASTEXITCODE -ne 0) {
+		throw "sc.exe $($Arguments -join ' ') failed with exit code $LASTEXITCODE"
+	}
+}
+
+function Get-Winws2ServiceDiagnostics {
+	$Lines = New-Object System.Collections.Generic.List[string]
+	$Svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+	if ($Svc) {
+		$Lines.Add("service status: $($Svc.Status)")
+	}
+	if (Test-Path -LiteralPath $ArgsFile) {
+		$Lines.Add("args file: $ArgsFile")
+	}
+	try {
+		$Query = @(& sc.exe queryex $ServiceName 2>&1)
+		if ($Query.Count -gt 0) {
+			$Lines.Add('sc queryex: ' + (($Query | ForEach-Object { "$_" }) -join ' '))
+		}
+	} catch {
+		$Lines.Add("sc queryex failed: $($_.Exception.Message)")
+	}
+	try {
+		$Events = @(Get-WinEvent -FilterHashtable @{
+			LogName = 'System'
+			ProviderName = 'Service Control Manager'
+			StartTime = (Get-Date).AddMinutes(-5)
+		} -MaxEvents 20 -ErrorAction SilentlyContinue | Where-Object {
+			($_.Message -match [regex]::Escape($ServiceName)) -or ($_.Message -match 'zapret2 winws2')
+		} | Select-Object -First 5)
+		if ($Events.Count -gt 0) {
+			$EventText = @($Events | ForEach-Object {
+				$Message = ($_.Message -replace '\s+', ' ').Trim()
+				"[$($_.Id)] $Message"
+			})
+			$Lines.Add('recent SCM events: ' + ($EventText -join ' || '))
+		}
+	} catch {
+		$Lines.Add("event log query failed: $($_.Exception.Message)")
+	}
+	if ($Lines.Count -eq 0) {
+		return 'no service diagnostics available'
+	}
+	return ($Lines -join '; ')
+}
+
 function Install-Winws2Service {
 	param([Parameter(Mandatory = $true)][string]$Exe)
 
@@ -612,15 +815,43 @@ function Install-Winws2Service {
 	$Svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 	if ($Svc) {
 		Info "Updating service $ServiceName"
-		& sc.exe config $ServiceName binPath= $BinPath start= auto | Out-Host
+		Invoke-ScCommand -Arguments @('config', $ServiceName, 'binPath=', $BinPath, 'start=', 'auto')
 	} else {
 		Info "Creating service $ServiceName"
-		& sc.exe create $ServiceName binPath= $BinPath start= auto DisplayName= 'zapret2 winws2' | Out-Host
-		& sc.exe description $ServiceName 'zapret2 One Tap WinDivert runner' | Out-Host
+		Invoke-ScCommand -Arguments @('create', $ServiceName, 'binPath=', $BinPath, 'start=', 'auto', 'DisplayName=', 'zapret2 winws2')
+		Invoke-ScCommand -Arguments @('description', $ServiceName, 'zapret2 One Tap WinDivert runner')
 	}
 
 	Info "Starting service $ServiceName"
-	Start-Service -Name $ServiceName
+	try {
+		Start-Service -Name $ServiceName -ErrorAction Stop
+		$SvcStarted = Get-Service -Name $ServiceName -ErrorAction Stop
+		$SvcStarted.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(10))
+	} catch {
+		$Diagnostics = Get-Winws2ServiceDiagnostics
+		throw "Could not start service $ServiceName: $($_.Exception.Message). $Diagnostics"
+	}
+}
+
+function Test-Winws2RunnerAlive {
+	if ($NoService) {
+		return (@(Get-Process -Name winws2 -ErrorAction SilentlyContinue).Count -gt 0)
+	}
+	$Svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+	return ($Svc -and $Svc.Status -eq 'Running')
+}
+
+function Assert-Winws2RunnerAlive {
+	param([Parameter(Mandatory = $true)][string]$Context)
+
+	if (Test-Winws2RunnerAlive) {
+		return
+	}
+	if ($NoService) {
+		throw "winws2 process is not running after $Context"
+	}
+	$Diagnostics = Get-Winws2ServiceDiagnostics
+	throw "Service $ServiceName is not running after $Context. $Diagnostics"
 }
 
 function Get-EnvInt {
@@ -896,7 +1127,7 @@ function Test-ConnectivityTargets {
 		CheckedAt = (Get-Date -Format s)
 		Targets = @($TargetResults)
 	}
-	$Report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ProbeReportFile -Encoding ASCII
+	$Report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ProbeReportFile -Encoding UTF8
 	return $Report
 }
 
@@ -921,6 +1152,10 @@ function Invoke-StrategySearch {
 
 	$Candidates = @(Get-StrategyCandidates)
 	$DelaySec = Get-EnvInt 'ZAPRET2_PROBE_START_DELAY_SEC' 4
+	$PreviousStrategy = $null
+	if (-not $ResetStrategy) {
+		$PreviousStrategy = Get-StrategySnapshot
+	}
 
 	foreach ($Candidate in $Candidates) {
 		Info "Trying strategy: $($Candidate.Name)"
@@ -928,8 +1163,11 @@ function Invoke-StrategySearch {
 		try {
 			Start-Winws2Runner $Exe $Candidate.Name
 			Start-Sleep -Seconds $DelaySec
+			Assert-Winws2RunnerAlive "starting strategy $($Candidate.Name)"
 			$Report = Test-ConnectivityTargets
 			if ($Report.Ok) {
+				Start-Sleep -Seconds 2
+				Assert-Winws2RunnerAlive "successful connectivity test for $($Candidate.Name)"
 				Info "Strategy selected: $($Candidate.Name)"
 				return
 			}
@@ -948,7 +1186,30 @@ function Invoke-StrategySearch {
 		}
 	}
 
+	if (Test-EnvFlag 'ZAPRET2_KEEP_FAILED_STRATEGY') {
+		if (Test-Winws2RunnerAlive) {
+			Write-Warning 'No strategy passed all probes, but ZAPRET2_KEEP_FAILED_STRATEGY=1 is set. Leaving the last started strategy running for manual app testing.'
+			return
+		}
+		Write-Warning 'ZAPRET2_KEEP_FAILED_STRATEGY=1 is set, but winws2 is not running; stopping as usual.'
+	}
+
 	Stop-Winws2
+	if ($PreviousStrategy) {
+		Restore-StrategySnapshot $PreviousStrategy
+		if ($PreviousStrategy.HasStrategy) {
+			$RestoredName = Get-StrategyStorageName $PreviousStrategy.Name
+			Write-Warning "Restored previous saved strategy after failed search: $RestoredName"
+		}
+	} else {
+		$EmptyStrategy = [pscustomobject]@{
+			HasStrategy = $false
+			Lines = @()
+			HasName = $false
+			Name = ''
+		}
+		Restore-StrategySnapshot $EmptyStrategy
+	}
 	throw "No built-in Windows strategy passed general web plus YouTube/Telegram/Discord connectivity tests. Service was stopped to keep normal connectivity. See $ProbeReportFile"
 }
 
@@ -997,7 +1258,8 @@ if ($NoProbe) {
 	if ($ResetStrategy -or -not (Test-Path -LiteralPath $StrategyFile)) {
 		Write-DiscordHostlist
 		Write-TargetHostlist
-		Save-StrategyCandidate (New-StrategyCandidate 'target-full-default' (Get-DefaultStrategyLines (Get-TargetHostlistArg)))
+		Write-TelegramIpset
+		Save-StrategyCandidate (New-StrategyCandidate 'target-full-default' (Get-DefaultStrategyLines (Get-TargetHostlistArg) (Get-TelegramIpsetArg)))
 	}
 	$StrategyName = 'manual'
 	if (Test-Path -LiteralPath $StrategyNameFile) {
