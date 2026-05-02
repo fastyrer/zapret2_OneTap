@@ -829,7 +829,7 @@ function Install-Winws2Service {
 		$SvcStarted.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Running, [TimeSpan]::FromSeconds(10))
 	} catch {
 		$Diagnostics = Get-Winws2ServiceDiagnostics
-		throw "Could not start service $ServiceName: $($_.Exception.Message). $Diagnostics"
+		throw "Could not start service ${ServiceName}: $($_.Exception.Message). $Diagnostics"
 	}
 }
 
