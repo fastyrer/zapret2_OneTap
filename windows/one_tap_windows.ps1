@@ -23,7 +23,7 @@ $DiscordHostlistFile = Join-Path $StateDir 'discord-hosts.txt'
 $TargetHostlistFile = Join-Path $StateDir 'one-tap-target-hosts.txt'
 $TelegramIpsetFile = Join-Path $StateDir 'telegram-ipset.txt'
 $DefaultReleaseRepos = @('fastyrer/zapret2_OneTap', 'bol-van/zapret2')
-$OneTapWindowsVersion = '2026-05-02.3'
+$OneTapWindowsVersion = '2026-05-02.4'
 
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 try {
@@ -884,7 +884,7 @@ function Get-EnvList {
 function New-ProbeUrl {
 	param(
 		[Parameter(Mandatory = $true)][string]$Url,
-		[int[]]$OkStatus = @(200, 204),
+		[int[]]$OkStatus = @(200, 204, 206),
 		[switch]$AcceptAnyHttp,
 		[int]$MinBytes = 0,
 		[string]$ContainsText = ''
@@ -1019,27 +1019,15 @@ function Read-ProbeBody {
 	}
 }
 
-function Test-ProbeResponse {
+function Test-ProbeContent {
 	param(
 		[Parameter(Mandatory = $true)]$Spec,
-		[Parameter(Mandatory = $true)]$Response,
-		[Parameter(Mandatory = $true)][int]$MaxBytes
+		[Parameter(Mandatory = $true)][int]$StatusCode,
+		[Parameter(Mandatory = $true)][byte[]]$Bytes,
+		[string]$Source = ''
 	)
 
-	$StatusCode = 0
-	if ($Response -is [Net.HttpWebResponse]) {
-		$StatusCode = [int]$Response.StatusCode
-	}
-
-	$NeedBody = (($Spec.MinBytes -gt 0) -or ($Spec.ContainsText -and $Spec.ContainsText.Length -gt 0))
-	$Body = [pscustomobject]@{
-		Bytes = [byte[]]@()
-		Length = 0
-	}
-	if ($NeedBody) {
-		$Body = Read-ProbeBody $Response $MaxBytes
-	}
-	$BytesRead = $Body.Length
+	$BytesRead = $Bytes.Length
 
 	$Failures = @()
 	if (-not $Spec.AcceptAnyHttp) {
@@ -1052,14 +1040,17 @@ function Test-ProbeResponse {
 		$Failures += "expected at least $($Spec.MinBytes) bytes"
 	}
 	if ($Spec.ContainsText -and $Spec.ContainsText.Length -gt 0) {
-		$BodyText = [Text.Encoding]::UTF8.GetString([byte[]]$Body.Bytes)
+		$BodyText = [Text.Encoding]::UTF8.GetString($Bytes)
 		if ($BodyText.IndexOf($Spec.ContainsText, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
 			$Failures += "expected text '$($Spec.ContainsText)'"
 		}
 	}
 
 	$Detail = "HTTP $StatusCode"
-	if ($NeedBody) {
+	if ($Source) {
+		$Detail = "$Source $Detail"
+	}
+	if (($Spec.MinBytes -gt 0) -or ($Spec.ContainsText -and $Spec.ContainsText.Length -gt 0)) {
 		$Detail = "$Detail, $BytesRead bytes"
 	}
 	if ($Failures.Count -gt 0) {
@@ -1073,6 +1064,101 @@ function Test-ProbeResponse {
 	}
 }
 
+function Test-ProbeResponse {
+	param(
+		[Parameter(Mandatory = $true)]$Spec,
+		[Parameter(Mandatory = $true)]$Response,
+		[Parameter(Mandatory = $true)][int]$MaxBytes
+	)
+
+	$StatusCode = 0
+	if ($Response -is [Net.HttpWebResponse]) {
+		$StatusCode = [int]$Response.StatusCode
+	}
+
+	$Body = [pscustomobject]@{
+		Bytes = [byte[]]@()
+		Length = 0
+	}
+	if (($Spec.MinBytes -gt 0) -or ($Spec.ContainsText -and $Spec.ContainsText.Length -gt 0)) {
+		$Body = Read-ProbeBody $Response $MaxBytes
+	}
+	return Test-ProbeContent $Spec $StatusCode ([byte[]]$Body.Bytes)
+}
+
+function Test-UrlReachableWithCurl {
+	param(
+		[Parameter(Mandatory = $true)]$Spec,
+		[Parameter(Mandatory = $true)][int]$TimeoutSec,
+		[Parameter(Mandatory = $true)][int]$MaxBytes
+	)
+
+	if (Test-EnvFlag 'ZAPRET2_DISABLE_CURL_PROBES') {
+		return $null
+	}
+	$Curl = Get-Command curl.exe -ErrorAction SilentlyContinue
+	if (-not $Curl) {
+		return $null
+	}
+
+	$Url = $Spec.Url
+	$BodyFile = Join-Path $StateDir ("probe-body-{0}.tmp" -f ([Guid]::NewGuid().ToString('N')))
+	$ErrorFile = Join-Path $StateDir ("probe-error-{0}.tmp" -f ([Guid]::NewGuid().ToString('N')))
+	try {
+		$RangeEnd = [Math]::Max(0, $MaxBytes - 1)
+		$CurlArgs = @(
+			'--silent',
+			'--show-error',
+			'--location',
+			'--max-time', [string]$TimeoutSec,
+			'--connect-timeout', [string]$TimeoutSec,
+			'--range', "0-$RangeEnd",
+			'--user-agent', 'zapret2-one-tap',
+			'--output', $BodyFile,
+			'--write-out', '%{http_code}',
+			$Url
+		)
+		$StatusOutput = & $Curl.Source @CurlArgs 2>$ErrorFile
+		$ExitCode = $LASTEXITCODE
+		$ErrorText = ''
+		if (Test-Path -LiteralPath $ErrorFile) {
+			$RawErrorText = Get-Content -LiteralPath $ErrorFile -Raw -ErrorAction SilentlyContinue
+			if ($RawErrorText) {
+				$ErrorText = $RawErrorText.Trim()
+			}
+		}
+		$StatusText = ($StatusOutput | Out-String).Trim()
+		$StatusCode = 0
+		if (-not [int]::TryParse($StatusText, [ref]$StatusCode)) {
+			$StatusCode = 0
+		}
+		if (($ExitCode -ne 0) -or ($StatusCode -eq 0)) {
+			$Detail = "curl exit $ExitCode"
+			if ($ErrorText) {
+				$Detail = "${Detail}: $ErrorText"
+			}
+			return [pscustomobject]@{
+				Ok = $false
+				Url = $Url
+				Detail = $Detail
+			}
+		}
+		$Bytes = [byte[]]@()
+		if (Test-Path -LiteralPath $BodyFile) {
+			$Bytes = [IO.File]::ReadAllBytes($BodyFile)
+			if ($Bytes.Length -gt $MaxBytes) {
+				$Trimmed = New-Object byte[] $MaxBytes
+				[Array]::Copy($Bytes, 0, $Trimmed, 0, $MaxBytes)
+				$Bytes = $Trimmed
+			}
+		}
+		return Test-ProbeContent $Spec $StatusCode $Bytes 'curl'
+	} finally {
+		Remove-Item -LiteralPath $BodyFile -Force -ErrorAction SilentlyContinue
+		Remove-Item -LiteralPath $ErrorFile -Force -ErrorAction SilentlyContinue
+	}
+}
+
 function Test-UrlReachable {
 	param(
 		[Parameter(Mandatory = $true)]$Spec,
@@ -1082,6 +1168,10 @@ function Test-UrlReachable {
 
 	if ($Spec -is [string]) {
 		$Spec = New-ProbeUrl -Url $Spec
+	}
+	$CurlResult = Test-UrlReachableWithCurl $Spec $TimeoutSec $MaxBytes
+	if ($CurlResult) {
+		return $CurlResult
 	}
 	$Url = $Spec.Url
 	$Response = $null
