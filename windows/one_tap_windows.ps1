@@ -72,6 +72,11 @@ function Write-TargetHostlist {
 		'googlevideo.com',
 		'ytimg.com',
 		'ggpht.com',
+		'www.youtube.com',
+		'm.youtube.com',
+		'i.ytimg.com',
+		's.ytimg.com',
+		'yt3.ggpht.com',
 		'youtubei.googleapis.com',
 		'youtube.googleapis.com',
 		'telegram.org',
@@ -79,7 +84,12 @@ function Write-TargetHostlist {
 		't.me',
 		'telegra.ph',
 		'tdesktop.com',
-		'telegram-cdn.org'
+		'telegram-cdn.org',
+		'api.telegram.org',
+		'web.telegram.org',
+		'desktop.telegram.org',
+		'updates.tdesktop.com',
+		'telesco.pe'
 	) + (Get-DiscordHosts)
 	New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 	Set-Content -LiteralPath $TargetHostlistFile -Value (@($Hosts | Select-Object -Unique)) -Encoding ASCII
@@ -561,13 +571,23 @@ function Stop-Winws2 {
 	if ($Svc) {
 		if ($Svc.Status -ne 'Stopped') {
 			Info "Stopping service $ServiceName"
-			Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
+			try {
+				Stop-Service -Name $ServiceName -Force -ErrorAction Stop
+			} catch {
+				Write-Warning "Stop-Service failed: $($_.Exception.Message)"
+				try {
+					& sc.exe stop $ServiceName | Out-Host
+				} catch {
+					Write-Warning "sc.exe stop failed: $($_.Exception.Message)"
+				}
+			}
 			try {
 				$SvcAfterStop = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
 				if ($SvcAfterStop) {
 					$SvcAfterStop.WaitForStatus([System.ServiceProcess.ServiceControllerStatus]::Stopped, [TimeSpan]::FromSeconds(10))
 				}
 			} catch {
+				Write-Warning "Service did not report stopped cleanly: $($_.Exception.Message)"
 			}
 		}
 	}
@@ -575,6 +595,10 @@ function Stop-Winws2 {
 	if ($Processes.Count -gt 0) {
 		Info "Stopping existing winws2 process"
 		$Processes | Stop-Process -Force -ErrorAction SilentlyContinue
+	}
+	$SvcFinal = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
+	if ($SvcFinal -and $SvcFinal.Status -ne 'Stopped') {
+		Write-Warning "Service $ServiceName status is still $($SvcFinal.Status)."
 	}
 }
 
@@ -616,36 +640,64 @@ function Get-EnvInt {
 	return $Default
 }
 
+function New-ProbeUrl {
+	param(
+		[Parameter(Mandatory = $true)][string]$Url,
+		[int[]]$OkStatus = @(200, 204),
+		[switch]$AcceptAnyHttp,
+		[int]$MinBytes = 0,
+		[string]$ContainsText = ''
+	)
+	[pscustomobject]@{
+		Url = $Url
+		OkStatus = @($OkStatus)
+		AcceptAnyHttp = [bool]$AcceptAnyHttp
+		MinBytes = $MinBytes
+		ContainsText = $ContainsText
+	}
+}
+
 function New-ProbeTarget {
 	param(
 		[Parameter(Mandatory = $true)][string]$Name,
-		[Parameter(Mandatory = $true)][string[]]$Urls
+		[Parameter(Mandatory = $true)][object[]]$Urls
 	)
+	$UrlSpecs = @()
+	foreach ($Spec in $Urls) {
+		if ($Spec -is [string]) {
+			$UrlSpecs += (New-ProbeUrl -Url $Spec)
+		} else {
+			$UrlSpecs += $Spec
+		}
+	}
 	[pscustomobject]@{
 		Name = $Name
-		Urls = $Urls
+		Urls = @($UrlSpecs)
 	}
 }
 
 function Get-ConnectivityTargets {
 	return @(
 		(New-ProbeTarget 'GeneralWeb' @(
-			'https://example.com/'
+			(New-ProbeUrl -Url 'https://example.com/' -MinBytes 500 -ContainsText 'Example Domain')
 		)),
 		(New-ProbeTarget 'YouTube' @(
-			'https://www.youtube.com/generate_204',
-			'https://www.youtube.com/robots.txt'
+			(New-ProbeUrl -Url 'https://www.youtube.com/generate_204' -OkStatus @(204)),
+			(New-ProbeUrl -Url 'https://www.youtube.com/' -MinBytes 2000),
+			(New-ProbeUrl -Url 'https://www.youtube.com/robots.txt' -MinBytes 100),
+			(New-ProbeUrl -Url 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg' -MinBytes 1000)
 		)),
 		(New-ProbeTarget 'Telegram' @(
-			'https://api.telegram.org',
-			'https://web.telegram.org'
+			(New-ProbeUrl -Url 'https://api.telegram.org' -MinBytes 20),
+			(New-ProbeUrl -Url 'https://web.telegram.org/k/' -MinBytes 1000),
+			(New-ProbeUrl -Url 'https://telegram.org/img/t_logo.png' -MinBytes 500)
 		)),
 		(New-ProbeTarget 'Discord' @(
-			'https://discord.com/api/v9/experiments',
-			'https://discord.com',
-			'https://discord.com/api/v9/gateway',
-			'https://gateway.discord.gg',
-			'https://cdn.discordapp.com'
+			(New-ProbeUrl -Url 'https://discord.com/api/v9/experiments' -MinBytes 20),
+			(New-ProbeUrl -Url 'https://discord.com/app' -MinBytes 2000),
+			(New-ProbeUrl -Url 'https://discord.com/api/v9/gateway' -MinBytes 20 -ContainsText 'gateway.discord.gg'),
+			(New-ProbeUrl -Url 'https://gateway.discord.gg' -AcceptAnyHttp),
+			(New-ProbeUrl -Url 'https://cdn.discordapp.com/embed/avatars/0.png' -MinBytes 500)
 		))
 	)
 }
@@ -663,12 +715,112 @@ function Get-HttpResponseFromException {
 	return $null
 }
 
-function Test-UrlReachable {
+function Read-ProbeBody {
 	param(
-		[Parameter(Mandatory = $true)][string]$Url,
-		[Parameter(Mandatory = $true)][int]$TimeoutSec
+		[Parameter(Mandatory = $true)]$Response,
+		[Parameter(Mandatory = $true)][int]$MaxBytes
 	)
 
+	$Stream = $null
+	$Memory = New-Object System.IO.MemoryStream
+	try {
+		$Stream = $Response.GetResponseStream()
+		if ($Stream) {
+			$Buffer = New-Object byte[] 8192
+			while ($Memory.Length -lt $MaxBytes) {
+				$Read = $Stream.Read($Buffer, 0, $Buffer.Length)
+				if ($Read -le 0) {
+					break
+				}
+				$Remaining = $MaxBytes - [int]$Memory.Length
+				$ToWrite = [Math]::Min($Read, $Remaining)
+				$Memory.Write($Buffer, 0, $ToWrite)
+				if ($ToWrite -lt $Read) {
+					break
+				}
+			}
+		}
+		$Bytes = $Memory.ToArray()
+		return [pscustomobject]@{
+			Bytes = $Bytes
+			Length = $Bytes.Length
+		}
+	} finally {
+		if ($Stream) {
+			try {
+				$Stream.Close()
+			} catch {
+			}
+		}
+		$Memory.Dispose()
+	}
+}
+
+function Test-ProbeResponse {
+	param(
+		[Parameter(Mandatory = $true)]$Spec,
+		[Parameter(Mandatory = $true)]$Response,
+		[Parameter(Mandatory = $true)][int]$MaxBytes
+	)
+
+	$StatusCode = 0
+	if ($Response -is [Net.HttpWebResponse]) {
+		$StatusCode = [int]$Response.StatusCode
+	}
+
+	$NeedBody = (($Spec.MinBytes -gt 0) -or ($Spec.ContainsText -and $Spec.ContainsText.Length -gt 0))
+	$Body = [pscustomobject]@{
+		Bytes = [byte[]]@()
+		Length = 0
+	}
+	if ($NeedBody) {
+		$Body = Read-ProbeBody $Response $MaxBytes
+	}
+	$BytesRead = $Body.Length
+
+	$Failures = @()
+	if (-not $Spec.AcceptAnyHttp) {
+		$OkStatuses = @($Spec.OkStatus)
+		if (($OkStatuses.Count -gt 0) -and ($OkStatuses -notcontains $StatusCode)) {
+			$Failures += "expected HTTP $($OkStatuses -join '/')"
+		}
+	}
+	if (($Spec.MinBytes -gt 0) -and ($BytesRead -lt $Spec.MinBytes)) {
+		$Failures += "expected at least $($Spec.MinBytes) bytes"
+	}
+	if ($Spec.ContainsText -and $Spec.ContainsText.Length -gt 0) {
+		$BodyText = [Text.Encoding]::UTF8.GetString([byte[]]$Body.Bytes)
+		if ($BodyText.IndexOf($Spec.ContainsText, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+			$Failures += "expected text '$($Spec.ContainsText)'"
+		}
+	}
+
+	$Detail = "HTTP $StatusCode"
+	if ($NeedBody) {
+		$Detail = "$Detail, $BytesRead bytes"
+	}
+	if ($Failures.Count -gt 0) {
+		$Detail = "$Detail; $($Failures -join '; ')"
+	}
+
+	return [pscustomobject]@{
+		Ok = ($Failures.Count -eq 0)
+		Url = $Spec.Url
+		Detail = $Detail
+	}
+}
+
+function Test-UrlReachable {
+	param(
+		[Parameter(Mandatory = $true)]$Spec,
+		[Parameter(Mandatory = $true)][int]$TimeoutSec,
+		[Parameter(Mandatory = $true)][int]$MaxBytes
+	)
+
+	if ($Spec -is [string]) {
+		$Spec = New-ProbeUrl -Url $Spec
+	}
+	$Url = $Spec.Url
 	$Response = $null
 	try {
 		[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -678,32 +830,20 @@ function Test-UrlReachable {
 		$Request.ReadWriteTimeout = $TimeoutSec * 1000
 		$Request.UserAgent = 'zapret2-one-tap'
 		if ($Request -is [Net.HttpWebRequest]) {
+			$Request.Accept = '*/*'
 			$Request.AllowAutoRedirect = $true
 			$Request.MaximumAutomaticRedirections = 3
+			try {
+				$Request.AutomaticDecompression = [Net.DecompressionMethods]::GZip -bor [Net.DecompressionMethods]::Deflate
+			} catch {
+			}
 		}
 		$Response = $Request.GetResponse()
-		$StatusCode = 'OK'
-		if ($Response -is [Net.HttpWebResponse]) {
-			$StatusCode = [int]$Response.StatusCode
-		}
-		return [pscustomobject]@{
-			Ok = $true
-			Url = $Url
-			Detail = "HTTP $StatusCode"
-		}
+		return Test-ProbeResponse $Spec $Response $MaxBytes
 	} catch {
 		$Response = Get-HttpResponseFromException $_.Exception
 		if ($Response) {
-			$StatusCode = 'response'
-			try {
-				$StatusCode = [int]$Response.StatusCode
-			} catch {
-			}
-			return [pscustomobject]@{
-				Ok = $true
-				Url = $Url
-				Detail = "HTTP $StatusCode"
-			}
+			return Test-ProbeResponse $Spec $Response $MaxBytes
 		}
 		return [pscustomobject]@{
 			Ok = $false
@@ -722,14 +862,15 @@ function Test-UrlReachable {
 
 function Test-ConnectivityTargets {
 	$TimeoutSec = Get-EnvInt 'ZAPRET2_PROBE_TIMEOUT_SEC' 6
+	$MaxBytes = Get-EnvInt 'ZAPRET2_PROBE_MAX_BYTES' 262144
 	$TargetResults = @()
 
 	foreach ($Target in Get-ConnectivityTargets) {
 		Info "Testing $($Target.Name)"
 		$UrlResults = @()
 		$TargetOk = $true
-		foreach ($Url in $Target.Urls) {
-			$UrlResult = Test-UrlReachable $Url $TimeoutSec
+		foreach ($UrlSpec in $Target.Urls) {
+			$UrlResult = Test-UrlReachable $UrlSpec $TimeoutSec $MaxBytes
 			$UrlResults += $UrlResult
 			if (-not $UrlResult.Ok) {
 				$TargetOk = $false
