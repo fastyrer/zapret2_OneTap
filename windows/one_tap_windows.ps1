@@ -23,7 +23,7 @@ $DiscordHostlistFile = Join-Path $StateDir 'discord-hosts.txt'
 $TargetHostlistFile = Join-Path $StateDir 'one-tap-target-hosts.txt'
 $TelegramIpsetFile = Join-Path $StateDir 'telegram-ipset.txt'
 $DefaultReleaseRepos = @('fastyrer/zapret2_OneTap', 'bol-van/zapret2')
-$OneTapWindowsVersion = '2026-05-02.2'
+$OneTapWindowsVersion = '2026-05-02.3'
 
 New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 try {
@@ -871,6 +871,16 @@ function Get-EnvInt {
 	return $Default
 }
 
+function Get-EnvList {
+	param([Parameter(Mandatory = $true)][string]$Name)
+
+	$Value = [Environment]::GetEnvironmentVariable($Name)
+	if (-not $Value) {
+		return @()
+	}
+	return @($Value -split '[,; ]+' | Where-Object { $_ -and $_.Trim().Length -gt 0 } | ForEach-Object { $_.Trim() })
+}
+
 function New-ProbeUrl {
 	param(
 		[Parameter(Mandatory = $true)][string]$Url,
@@ -891,7 +901,8 @@ function New-ProbeUrl {
 function New-ProbeTarget {
 	param(
 		[Parameter(Mandatory = $true)][string]$Name,
-		[Parameter(Mandatory = $true)][object[]]$Urls
+		[Parameter(Mandatory = $true)][object[]]$Urls,
+		[int]$MinOkUrls = 0
 	)
 	$UrlSpecs = @()
 	foreach ($Spec in $Urls) {
@@ -901,36 +912,57 @@ function New-ProbeTarget {
 			$UrlSpecs += $Spec
 		}
 	}
+	$RequiredOkUrls = $MinOkUrls
+	if ($RequiredOkUrls -le 0) {
+		$RequiredOkUrls = $UrlSpecs.Count
+	}
+	if ($RequiredOkUrls -gt $UrlSpecs.Count) {
+		$RequiredOkUrls = $UrlSpecs.Count
+	}
 	[pscustomobject]@{
 		Name = $Name
 		Urls = @($UrlSpecs)
+		MinOkUrls = $RequiredOkUrls
 	}
 }
 
 function Get-ConnectivityTargets {
-	return @(
-		(New-ProbeTarget 'GeneralWeb' @(
+	$Targets = @(
+		(New-ProbeTarget -Name 'GeneralWeb' -Urls @(
 			(New-ProbeUrl -Url 'https://example.com/' -MinBytes 500 -ContainsText 'Example Domain')
-		)),
-		(New-ProbeTarget 'YouTube' @(
+		) -MinOkUrls 1),
+		(New-ProbeTarget -Name 'YouTube' -Urls @(
 			(New-ProbeUrl -Url 'https://www.youtube.com/generate_204' -OkStatus @(204)),
 			(New-ProbeUrl -Url 'https://www.youtube.com/' -MinBytes 2000),
 			(New-ProbeUrl -Url 'https://www.youtube.com/robots.txt' -MinBytes 100),
 			(New-ProbeUrl -Url 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg' -MinBytes 1000)
-		)),
-		(New-ProbeTarget 'Telegram' @(
+		) -MinOkUrls 3),
+		(New-ProbeTarget -Name 'Telegram' -Urls @(
 			(New-ProbeUrl -Url 'https://api.telegram.org' -MinBytes 20),
 			(New-ProbeUrl -Url 'https://web.telegram.org/k/' -MinBytes 1000),
 			(New-ProbeUrl -Url 'https://telegram.org/img/t_logo.png' -MinBytes 500)
-		)),
-		(New-ProbeTarget 'Discord' @(
+		) -MinOkUrls 1),
+		(New-ProbeTarget -Name 'Discord' -Urls @(
 			(New-ProbeUrl -Url 'https://discord.com/api/v9/experiments' -MinBytes 20),
 			(New-ProbeUrl -Url 'https://discord.com/app' -MinBytes 2000),
 			(New-ProbeUrl -Url 'https://discord.com/api/v9/gateway' -MinBytes 20 -ContainsText 'gateway.discord.gg'),
 			(New-ProbeUrl -Url 'https://gateway.discord.gg' -AcceptAnyHttp),
 			(New-ProbeUrl -Url 'https://cdn.discordapp.com/embed/avatars/0.png' -MinBytes 500)
-		))
+		) -MinOkUrls 4)
 	)
+	$RequestedTargets = Get-EnvList 'ZAPRET2_PROBE_TARGETS'
+	if ($RequestedTargets.Count -gt 0) {
+		$Wanted = @{}
+		foreach ($TargetName in $RequestedTargets) {
+			$Wanted[$TargetName.ToLowerInvariant()] = $true
+		}
+		$SelectedTargets = @($Targets | Where-Object { ($_.Name -eq 'GeneralWeb') -or $Wanted.ContainsKey($_.Name.ToLowerInvariant()) })
+		if ($SelectedTargets.Count -gt 1) {
+			return @($SelectedTargets)
+		}
+		Write-Warning "ZAPRET2_PROBE_TARGETS did not match any known target; using all probe targets."
+	}
+	return @($Targets)
 }
 
 function Get-HttpResponseFromException {
@@ -1094,22 +1126,28 @@ function Test-UrlReachable {
 function Test-ConnectivityTargets {
 	$TimeoutSec = Get-EnvInt 'ZAPRET2_PROBE_TIMEOUT_SEC' 6
 	$MaxBytes = Get-EnvInt 'ZAPRET2_PROBE_MAX_BYTES' 262144
+	$StrictProbes = Test-EnvFlag 'ZAPRET2_STRICT_PROBES'
 	$TargetResults = @()
 
 	foreach ($Target in Get-ConnectivityTargets) {
 		Info "Testing $($Target.Name)"
 		$UrlResults = @()
-		$TargetOk = $true
 		foreach ($UrlSpec in $Target.Urls) {
 			$UrlResult = Test-UrlReachable $UrlSpec $TimeoutSec $MaxBytes
 			$UrlResults += $UrlResult
-			if (-not $UrlResult.Ok) {
-				$TargetOk = $false
-			}
 		}
+		$OkUrls = @($UrlResults | Where-Object { $_.Ok }).Count
+		$RequiredOkUrls = $Target.MinOkUrls
+		if ($StrictProbes) {
+			$RequiredOkUrls = @($Target.Urls).Count
+		}
+		$TargetOk = ($OkUrls -ge $RequiredOkUrls)
 		$TargetResults += [pscustomobject]@{
 			Name = $Target.Name
 			Ok = $TargetOk
+			OkUrls = $OkUrls
+			RequiredOkUrls = $RequiredOkUrls
+			TotalUrls = @($Target.Urls).Count
 			Urls = @($UrlResults)
 		}
 	}
@@ -1129,6 +1167,32 @@ function Test-ConnectivityTargets {
 	}
 	$Report | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ProbeReportFile -Encoding UTF8
 	return $Report
+}
+
+function Get-ConnectivityReportScore {
+	param([Parameter(Mandatory = $true)]$Report)
+
+	$Score = 0
+	foreach ($Target in $Report.Targets) {
+		if ($Target.Ok) {
+			$Score += 1000
+		}
+		if ($Target.PSObject.Properties['OkUrls']) {
+			$Score += [int]$Target.OkUrls
+		}
+	}
+	return $Score
+}
+
+function Test-ConnectivityReportCanBeKept {
+	param([Parameter(Mandatory = $true)]$Report)
+
+	$GeneralWeb = @($Report.Targets | Where-Object { $_.Name -eq 'GeneralWeb' } | Select-Object -First 1)
+	if (($GeneralWeb.Count -eq 0) -or (-not $GeneralWeb[0].Ok)) {
+		return $false
+	}
+	$PassedTargetServices = @($Report.Targets | Where-Object { ($_.Name -ne 'GeneralWeb') -and $_.Ok })
+	return ($PassedTargetServices.Count -gt 0)
 }
 
 function Start-Winws2Runner {
@@ -1153,6 +1217,9 @@ function Invoke-StrategySearch {
 	$Candidates = @(Get-StrategyCandidates)
 	$DelaySec = Get-EnvInt 'ZAPRET2_PROBE_START_DELAY_SEC' 4
 	$PreviousStrategy = $null
+	$BestCandidate = $null
+	$BestReport = $null
+	$BestReportScore = -1
 	if (-not $ResetStrategy) {
 		$PreviousStrategy = Get-StrategySnapshot
 	}
@@ -1165,6 +1232,12 @@ function Invoke-StrategySearch {
 			Start-Sleep -Seconds $DelaySec
 			Assert-Winws2RunnerAlive "starting strategy $($Candidate.Name)"
 			$Report = Test-ConnectivityTargets
+			$ReportScore = Get-ConnectivityReportScore $Report
+			if ($ReportScore -gt $BestReportScore) {
+				$BestCandidate = $Candidate
+				$BestReport = $Report
+				$BestReportScore = $ReportScore
+			}
 			if ($Report.Ok) {
 				Start-Sleep -Seconds 2
 				Assert-Winws2RunnerAlive "successful connectivity test for $($Candidate.Name)"
@@ -1173,9 +1246,10 @@ function Invoke-StrategySearch {
 			}
 			$FailedDetails = @($Report.Targets | Where-Object { -not $_.Ok } | ForEach-Object {
 				$TargetName = $_.Name
+				$TargetSummary = "$($_.OkUrls)/$($_.RequiredOkUrls) required URLs passed"
 				$FailedUrls = @($_.Urls | Where-Object { -not $_.Ok } | ForEach-Object { "$($_.Url) ($($_.Detail))" })
 				if ($FailedUrls.Count -gt 0) {
-					"$TargetName`: $($FailedUrls -join '; ')"
+					"$TargetName ($TargetSummary): $($FailedUrls -join '; ')"
 				} else {
 					$TargetName
 				}
@@ -1183,6 +1257,24 @@ function Invoke-StrategySearch {
 			Write-Warning "Strategy $($Candidate.Name) failed connectivity test: $($FailedDetails -join ' | ')"
 		} catch {
 			Write-Warning "Strategy $($Candidate.Name) failed to start or test: $($_.Exception.Message)"
+		}
+	}
+
+	if ((-not (Test-EnvFlag 'ZAPRET2_STRICT_PROBES')) -and $BestCandidate -and $BestReport -and (Test-ConnectivityReportCanBeKept $BestReport)) {
+		$PassedTargets = @($BestReport.Targets | Where-Object { $_.Ok } | ForEach-Object { $_.Name })
+		$FailedTargets = @($BestReport.Targets | Where-Object { -not $_.Ok } | ForEach-Object { $_.Name })
+		Write-Warning "No strategy passed every selected probe target. Keeping best degraded strategy $($BestCandidate.Name): passed $($PassedTargets -join ', '); failed $($FailedTargets -join ', '). Set ZAPRET2_STRICT_PROBES=1 to require the old all-probes-pass behavior."
+		Save-StrategyCandidate $BestCandidate
+		try {
+			Start-Winws2Runner $Exe $BestCandidate.Name
+			Start-Sleep -Seconds $DelaySec
+			Assert-Winws2RunnerAlive "degraded fallback strategy $($BestCandidate.Name)"
+			$BestReport | Add-Member -NotePropertyName SelectedStrategy -NotePropertyValue $BestCandidate.Name -Force
+			$BestReport | Add-Member -NotePropertyName Degraded -NotePropertyValue $true -Force
+			$BestReport | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $ProbeReportFile -Encoding UTF8
+			return
+		} catch {
+			Write-Warning "Best degraded strategy $($BestCandidate.Name) failed to restart: $($_.Exception.Message)"
 		}
 	}
 
